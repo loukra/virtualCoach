@@ -36,7 +36,7 @@ def run_onboarding_process(user_id: str, code: str):
 
         # C. Download History (The slow part)
         print(f"   -> Fetching History...")
-        fetch_past_activities(user_id, days_back=90)
+        fetch_past_activities(user_id, days_back=10)
 
         # D. (Optional) Generate First Workout
         # print(f"   -> Generating AI Plan...")
