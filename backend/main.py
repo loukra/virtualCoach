@@ -5,6 +5,7 @@ from db import supabase
 # Import your existing logic
 from auth import exchange_code_for_token
 from sync import fetch_past_activities
+from analysis import calculate_daily_metrics
 # from coach import generate_workout # Uncomment this when you are ready for AI generation
 
 app = FastAPI()
@@ -37,7 +38,7 @@ def run_onboarding_process(user_id: str, code: str):
         # C. Download History (The slow part)
         print(f"   -> Fetching History...")
         fetch_past_activities(user_id, days_back=10)
-
+        calculate_daily_metrics(user_id)
         # D. (Optional) Generate First Workout
         # print(f"   -> Generating AI Plan...")
         # generate_workout(user_id)
