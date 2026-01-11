@@ -4,7 +4,7 @@ import uuid
 
 # 1. Create a Fake User in Supabase (if they don't exist)
 # We need a valid UUID to link the tokens to.
-TEST_USER_ID = "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11"
+TEST_USER_ID = "2b392516-721e-4142-95c0-affa639611e6"
 
 try:
     # Try to insert a dummy user into the profiles table
