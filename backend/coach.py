@@ -6,30 +6,70 @@ from openai import OpenAI
 from dotenv import load_dotenv 
 from db import supabase
 from auth_manager import login_user
+from datetime import date, timedelta
 
 # 1. LOAD ENV
 load_dotenv() 
 client = OpenAI()
 
+
+def format_compliance_history(plans, activities):
+    """
+    Merges planned vs actual data for the last 7 days into a readable string.
+    """
+    history_text = ""
+    today = date.today()
+    
+    # Loop back 7 days
+    for i in range(7, 0, -1):
+        check_date = (today - timedelta(days=i)).isoformat()
+        
+        # Find Plan for this date
+        day_plan = next((p for p in plans if p['date'] == check_date), None)
+        
+        # Find Activities for this date (Simple string matching on YYYY-MM-DD)
+        # Note: Strava start_date usually looks like "2023-10-27T08:00:00Z"
+        day_acts = [a for a in activities if a['start_date'].startswith(check_date)]
+        
+        date_str = f"[{check_date}]"
+        
+        # String Building
+        plan_str = "Date was before Journey start. Don't include" 
+        if day_plan:
+            plan_str = f"{day_plan.get('planned_workout_type', 'Unknown')} ({day_plan.get('planned_duration_min', 0)}m, TSS: {day_plan.get('planned_tss', 0)})"
+            
+        act_str = "No Activity"
+        if day_acts:
+            # Summarize all activities that day
+            details = []
+            for act in day_acts:
+                # Convert seconds to minutes for display
+                dur_min = int(act.get('duration_seconds', 0) / 60)
+                details.append(f"{act.get('name')} ({dur_min}m, TSS: {act.get('tss', 0)})")
+            act_str = " + ".join(details)
+            
+        history_text += f"{date_str} PLAN: {plan_str} | ACTUAL: {act_str}\n"
+        print(history_text)
+    return history_text
+
 def get_todays_context(user_id):
     today = date.today().isoformat()
     today_date_obj = date.today()
+    seven_days_ago = (today_date_obj - timedelta(days=7)).isoformat()
     
     print(f"--- 🧠 GATHERING CONTEXT FOR {today} ---")
 
     # 1. PROFILE
-# 1. PROFILE (Now fetching Max HR)
     profile = supabase.table("profiles").select("ftp, weight_kg, max_heart_rate").eq("id", user_id).execute()
     ftp = profile.data[0]['ftp'] if profile.data else 200
     weight = profile.data[0]['weight_kg'] if profile.data else 75
-    max_hr = profile.data[0].get('max_heart_rate', 190) # Default to 190 if missing
+    max_hr = profile.data[0].get('max_heart_rate', 190)
 
     # 2. METRICS (Fitness Level)
     metrics = supabase.table("daily_metrics").select("*").eq("user_id", user_id).eq("date", today).execute()
     stats = metrics.data[0] if metrics.data else None
     
-    # 3. JOURNEY MACRO CONTEXT (The "Big Picture")
-    # We fetch start_date and race_date to calculate timeline
+    # 3. JOURNEY MACRO CONTEXT
     journey = supabase.table("journeys")\
         .select("id, name, start_date, race_date")\
         .eq("user_id", user_id)\
@@ -39,10 +79,7 @@ def get_todays_context(user_id):
     
     plan_data = None
     macro_context = {
-        "days_until_race": 999,
-        "current_week": 1,
-        "total_weeks": 12,
-        "journey_name": "General Fitness"
+        "days_until_race": 999, "current_week": 1, "total_weeks": 12, "journey_name": "General Fitness", "journey_id": None
     }
     
     if journey.data:
@@ -62,10 +99,11 @@ def get_todays_context(user_id):
             "days_until_race": days_until,
             "current_week": current_week,
             "total_weeks": total_weeks,
-            "journey_name": j['name']
+            "journey_name": j['name'],
+            "journey_id": journey_id
         }
 
-        # Get specific plan for TODAY
+        # Get TODAY's Plan
         plan = supabase.table("master_plan").select("*").eq("journey_id", journey_id).eq("date", today).execute()
         if plan.data: plan_data = plan.data[0]
 
@@ -73,8 +111,29 @@ def get_todays_context(user_id):
     checkin = supabase.table("daily_checkins").select("*").eq("user_id", user_id).eq("date", today).execute()
     user_feel = checkin.data[0] if checkin.data else None
 
-    # 5. HISTORY
-    recent_rides = supabase.table("activities").select("name, tss, start_date").eq("user_id", user_id).order("start_date", desc=True).limit(3).execute()
+    # --- 5. NEW: COMPLIANCE HISTORY (Last 7 Days) ---
+    # A. Fetch Past Plans
+    recent_plans_data = []
+    if macro_context['journey_id']:
+        p_query = supabase.table("master_plan")\
+            .select("date, planned_workout_type, planned_duration_min, planned_tss")\
+            .eq("journey_id", macro_context['journey_id'])\
+            .gte("date", seven_days_ago)\
+            .lt("date", today)\
+            .execute()
+        recent_plans_data = p_query.data
+
+    # B. Fetch Past Activities
+    a_query = supabase.table("activities")\
+        .select("start_date, name, tss, duration_seconds")\
+        .eq("user_id", user_id)\
+        .gte("start_date", seven_days_ago)\
+        .lt("start_date", today)\
+        .execute()
+    recent_activities_data = a_query.data
+
+    # Generate the comparison text using the helper function
+    compliance_text = format_compliance_history(recent_plans_data, recent_activities_data)
 
     return {
         "ftp": ftp,
@@ -82,10 +141,11 @@ def get_todays_context(user_id):
         "max_hr": max_hr,
         "stats": stats,
         "plan": plan_data,
-        "macro": macro_context, # <--- NEW: Contains the timeline info
+        "macro": macro_context,
         "checkin": user_feel,
-        "history": recent_rides.data
+        "compliance_history": compliance_text # <--- Passing the comparison string
     }
+
 
 def create_zwift_file(workout_text, ftp):
     """
@@ -149,7 +209,7 @@ Example Output Structure:
         # Step 1: Draft using Responses API
         print("   Drafting XML structure...")
         response = client.responses.create(
-            model="gpt-5-mini", # Updated model for Responses API
+            model="gpt-5-nano", # Updated model for Responses API
             input=[
                 {"role": "system", "content": "You are a Zwift zwo coding expert."}, 
                 {"role": "user", "content": prompt}
@@ -194,7 +254,7 @@ Example Output Structure:
         """
         
         response_val = client.responses.create(
-            model="gpt-5-mini",
+            model="gpt-5-nano",
             input=[
                 {"role": "system", "content": "You are a code validator."}, 
                 {"role": "user", "content": validation_prompt}
@@ -227,7 +287,7 @@ Example Output Structure:
     except Exception as e:
         print(f"❌ Error creating Zwift file: {e}")
 
-def generate_workout(user_id):
+def generate_workout(user_id, available_time=60):
     context = get_todays_context(user_id)
     ftp = context['ftp']
     max_hr = context['max_hr']
@@ -235,14 +295,9 @@ def generate_workout(user_id):
     plan = context['plan']
     macro = context['macro'] # <--- NEW
     checkin = context['checkin']
+    compliance_history = context['compliance_history'] # <--- Unpack new data
 
-# --- 1. ASK FOR TIME CONSTRAINT (CRITICAL) ---
-    print("\n--- ⏱️ TIME CHECK ---")
-    try:
-        available_time = int(input("How many minutes do you have to ride today? (e.g. 60): "))
-    except ValueError:
-        available_time = 60 # Default to 1 hour if user messes up
-        print("   (Defaulting to 60 mins)")
+
 
     # --- CALCULATE HR ZONES (Standard Cycling Estimates) ---
     # Z1: <60%, Z2: 60-70%, Z3: 70-80%, Z4: 80-90%, Z5: >90%
@@ -255,21 +310,29 @@ def generate_workout(user_id):
     }
     
     # SYSTEM PROMPT
+# SYSTEM PROMPT
     system_prompt = """
     You are an elite cycling coach. Prescribe the EXACT daily workout.
     
     TOOLS AVAILABLE:
     - Use Web Search to check route details of the user's Race Goal if applicable.
     
-    OUTPUT FORMAT:
-    1. TITLE
-    2. CONTEXT
-    3. THE WORKOUT (Warmup -> Main Set -> Cooldown)
-       - For EVERY interval, provide:
+    CONTENT RELATED OUTPUT FORMAT:
+    1. **HEADLINE:** Start immediately with a descriptive name as an H1 Header (e.g. "# VO2 Max Pyramids" or "# Steady State Tempo"). Do NOT use the words "Title:" or "Week X Day Y".
+    2. **CONTEXT:** A 1-sentence summary of why we are doing this today.
+    3. **THE WORKOUT:** (Warmup -> Main Set -> Cooldown)
+       - For EVERY interval, except warmup and cooldown, provide:
          a) Power Target (Watts)
          b) Heart Rate Cap (bpm)
-       - Explicitly state: "If HR exceeds [X] bpm, reduce power immediately."
-    4. TSS ESTIMATE
+         c) Explicitly state: "If HR exceeds [X] bpm, recommendation...."
+    4. **TSS ESTIMATE**
+
+    TECHNICAL OUTPUT RULES (MARKDOWN FORMAT):
+    1. Use # for the Workout Name (Top level).
+    2. Use ## for Section Headers (e.g. ## Warmup, ## Main Set).
+    3. Use **Bold** for critical numbers (Watts, HR, Duration).
+    4. Use bullet points (-) for the specific steps.
+    5. Do NOT output "Title:" as text. Just the Header.
     """
     
     # USER SCENARIO
@@ -285,7 +348,6 @@ def generate_workout(user_id):
     - FTP: {ftp}W
     - Max HR: {max_hr} bpm
     - CTL (Fitness): {stats['ctl'] if stats else '0'}  
-    
     - TSB (Freshness): {stats['tsb'] if stats else '0'}
     
     HEART RATE ZONES (REFERENCE):
@@ -302,12 +364,13 @@ def generate_workout(user_id):
     {f"- Mood: {checkin['feel_score']}/5" if checkin else "- No check-in today."}
     {f"- Legs: {checkin['soreness_score']}/5" if checkin else ""}
     
-    RECENT HISTORY:
-    {context['history']}
+--- TRAINING COMPLIANCE (LAST 7 DAYS) ---
+    Compare the Plan vs Actual below. 
+    
+    {compliance_history}
     
 INSTRUCTIONS:
     1. **TIME LIMIT IS LAW:** The Total Workout Duration MUST be <= {available_time} minutes.
-    2. **ADAPT:** If the Planned Duration ({plan['planned_duration_min'] if plan else 0} min) > Available Time ({available_time} min), you MUST increase the intensity to compensate (e.g. change Endurance -> Tempo/Sweet Spot).
     3. **PRESCRIBE:** Define Watt targets based on {ftp}W and HR caps from the zone list.
     4. **SAFETY:** Add the Heart Rate safety valve instruction for every interval.
     """
@@ -317,7 +380,7 @@ INSTRUCTIONS:
     try:
         # UPDATED TO RESPONSES API
         response = client.responses.create(
-            model="gpt-5-mini", 
+            model="gpt-5-nano", 
             input=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_scenario}
@@ -328,15 +391,15 @@ INSTRUCTIONS:
         # Access content via the new helper
         workout_text = response.output_text
         
-        print("\n" + "="*40)
-        print(workout_text)
-        print("="*40)
+       # print("\n" + "="*40)
+        #print(workout_text)
+        #print("="*40)
         
         # --- NEW SECTION: ASK FOR ZWIFT FILE ---
-        ask_zwift = input("\n🎮 Do you want to create a Zwift (.zwo) file for this? (y/N): ").lower().strip()
+       # ask_zwift = input("\n🎮 Do you want to create a Zwift (.zwo) file for this? (y/N): ").lower().strip()
         
-        if ask_zwift == 'y':
-            create_zwift_file(workout_text, ftp)
+       # if ask_zwift == 'y':
+       #     create_zwift_file(workout_text, ftp)
         
         return workout_text
 
