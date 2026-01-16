@@ -2,11 +2,10 @@ import React, { useState } from 'react';
 import { StyleSheet, View, Text, TouchableOpacity, ActivityIndicator, Alert } from 'react-native';
 import * as WebBrowser from 'expo-web-browser';
 import * as Linking from 'expo-linking';
-
+import { BACKEND_URL } from '../constants'; // 👈 Import from config
 // 1. Configuration
-// ⚠️ REPLACE WITH YOUR LOCAL IP (e.g., 192.168.178.XX)
-const BACKEND_URL = 'http://192.168.178.39:8000'; 
-const STRAVA_CLIENT_ID = '194995'; 
+
+const STRAVA_CLIENT_ID = process.env.EXPO_PUBLIC_STRAVA_CLIENT_ID;
 // This tells Strava to open your app after login
 const REDIRECT_URI = Linking.createURL('/'); 
 

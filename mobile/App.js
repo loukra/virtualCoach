@@ -5,7 +5,7 @@ import { supabase } from './lib/supabase';
 
 // Components
 import Auth from './components/Auth';
-import ConnectStrava from './components/ConnectStrava';
+import ConnectStrava from './components/connectStrava';
 import SetupProfile from './components/SetupProfile';
 import Dashboard from './screens/Dashboard'; // New file
 
