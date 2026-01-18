@@ -39,10 +39,21 @@ export default function Dashboard() {
     setJourneys(data || []);
   };
 
-  const triggerApiSync = async (userId) => {
+const triggerApiSync = async (userId) => {
     setIsSyncing(true);
-    try { await fetch(`${API_URL}/sync`, { method: 'POST', body: JSON.stringify({ user_id: userId }) }); }
-    catch (e) {} finally { setTimeout(() => setIsSyncing(false), 3000); }
+    try { 
+        await fetch(`${API_URL}/sync`, { 
+            method: 'POST', 
+            // 👇 YOU WERE MISSING THIS LINE:
+            headers: { 'Content-Type': 'application/json' }, 
+            body: JSON.stringify({ user_id: userId }) 
+        }); 
+    }
+    catch (e) {
+        console.log(e);
+    } finally { 
+        setTimeout(() => setIsSyncing(false), 3000); 
+    }
   };
 
   // --- NAVIGATION HANDLERS ---
