@@ -1,4 +1,4 @@
-from db import supabase
+from backend.core.db import supabase
 from datetime import date
 from auth_manager import login_user
 

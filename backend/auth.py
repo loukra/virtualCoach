@@ -1,7 +1,7 @@
 import os
 import time
 from stravalib.client import Client
-from db import supabase
+from core.db import supabase
 from dotenv import load_dotenv
 
 load_dotenv()

@@ -1,10 +1,9 @@
 import os
-import re
 import xml.etree.ElementTree as ET
 from datetime import date
 from openai import OpenAI
 from dotenv import load_dotenv 
-from db import supabase
+from core.db import supabase
 from auth_manager import login_user
 from datetime import date, timedelta
 

@@ -2,7 +2,7 @@ import time
 import numpy as np
 from datetime import datetime, timedelta
 from stravalib.client import Client
-from db import supabase
+from core.db import supabase
 from auth_manager import login_user
 
 # --- 1. MATH HELPERS (Clean & Modular) ---

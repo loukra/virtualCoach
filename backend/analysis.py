@@ -1,7 +1,7 @@
 import math
 import numpy as np
-from datetime import date, timedelta, datetime
-from db import supabase
+from datetime import date, timedelta
+from core.db import supabase
 from auth_manager import login_user  # <--- THIS WAS MISSING
 
 def calculate_daily_metrics(user_id: str):

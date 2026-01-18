@@ -1,6 +1,6 @@
 import numpy as np
 from datetime import date, timedelta, datetime
-from db import supabase
+from backend.core.db import supabase
 
 def calculate_daily_metrics(user_id: str):
     print(f"--- 📊 STARTING ADVANCED ANALYSIS FOR {user_id} ---")

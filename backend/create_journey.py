@@ -4,7 +4,7 @@ import time
 from datetime import date, timedelta
 from dotenv import load_dotenv
 from openai import OpenAI
-from db import supabase
+from backend.core.db import supabase
 from auth_manager import login_user
 
 # Load API Keys

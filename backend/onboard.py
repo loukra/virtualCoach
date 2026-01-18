@@ -1,5 +1,5 @@
 from auth import get_authorization_url, exchange_code_for_token
-from db import supabase
+from backend.core.db import supabase
 import uuid
 
 # 1. Create a Fake User in Supabase (if they don't exist)

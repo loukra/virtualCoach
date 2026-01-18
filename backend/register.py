@@ -1,6 +1,6 @@
 import time
 import getpass
-from db import supabase
+from backend.core.db import supabase
 from auth import get_authorization_url, exchange_code_for_token
 
 def register_new_user():

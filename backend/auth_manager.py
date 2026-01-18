@@ -1,5 +1,5 @@
 import getpass
-from db import supabase
+from core.db import supabase
 
 def login_user():
     """
