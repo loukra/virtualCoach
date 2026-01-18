@@ -1,18 +1,27 @@
 import React, { useState, useEffect } from 'react';
-import { StyleSheet, View, Text, TouchableOpacity, SafeAreaView, FlatList, ActivityIndicator, Modal } from 'react-native';
+import { 
+  StyleSheet, 
+  View, 
+  Text, 
+  TouchableOpacity, 
+  SafeAreaView, 
+  FlatList, 
+  ActivityIndicator 
+} from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { supabase } from '../lib/supabase';
 import { API_URL } from '../constants'; 
 import CreateJourneyModal from '../components/CreateJourneyModal';
-import JourneyOverview from '../components/JourneyOverview'; // 👈 Import the new component
+
+// 👇 IMPORT NAVIGATION HOOK
+import { useNavigation } from '@react-navigation/native';
 
 export default function Dashboard() {
+  const navigation = useNavigation(); // 👈 Hook to control navigation
+  
   const [journeys, setJourneys] = useState([]);
-  const [selectedJourneyId, setSelectedJourneyId] = useState(null); // 👈 Controls Navigation
-  const [headerTitle, setHeaderTitle] = useState(null); // Display name in top-right
   const [isSyncing, setIsSyncing] = useState(false);
   const [createModalVisible, setCreateModalVisible] = useState(false);
-  const [menuVisible, setMenuVisible] = useState(false);
 
   // 1. Initial Load
   useEffect(() => {
@@ -39,12 +48,11 @@ export default function Dashboard() {
     setJourneys(data || []);
   };
 
-const triggerApiSync = async (userId) => {
+  const triggerApiSync = async (userId) => {
     setIsSyncing(true);
     try { 
         await fetch(`${API_URL}/sync`, { 
             method: 'POST', 
-            // 👇 YOU WERE MISSING THIS LINE:
             headers: { 'Content-Type': 'application/json' }, 
             body: JSON.stringify({ user_id: userId }) 
         }); 
@@ -56,113 +64,64 @@ const triggerApiSync = async (userId) => {
     }
   };
 
-  // --- NAVIGATION HANDLERS ---
-  const handleSelectJourney = (journey) => {
-    setSelectedJourneyId(journey.id);
-    setHeaderTitle(journey.name); // Set initial title
-  };
-
-  const handleBackToHome = () => {
-    setSelectedJourneyId(null);
-    setHeaderTitle(null);
-    fetchJourneys(); // Refresh list to see status updates
-  };
-
   const handleJourneyCreated = () => {
     fetchJourneys(); 
-    // Optional: Auto-select the new journey?
-    // For now, let's just refresh the list.
   };
-
-  // --- MENU COMPONENT ---
-  const SimpleMenu = () => (
-    <Modal animationType="fade" transparent={true} visible={menuVisible} onRequestClose={() => setMenuVisible(false)}>
-      <TouchableOpacity style={styles.modalOverlay} activeOpacity={1} onPress={() => setMenuVisible(false)}>
-        <View style={styles.menuContainer}>
-          <Text style={styles.menuHeader}>Menu</Text>
-          <TouchableOpacity style={styles.menuItem} onPress={() => supabase.auth.signOut()}>
-            <Ionicons name="log-out-outline" size={24} color="#ff4d4d" />
-            <Text style={[styles.menuText, { color: '#ff4d4d' }]}>Sign Out</Text>
-          </TouchableOpacity>
-        </View>
-      </TouchableOpacity>
-    </Modal>
-  );
 
   return (
     <SafeAreaView style={styles.container}>
-      <SimpleMenu />
       <CreateJourneyModal visible={createModalVisible} onClose={() => setCreateModalVisible(false)} onJourneyCreated={handleJourneyCreated} />
 
       {/* --- HEADER --- */}
       <View style={styles.header}>
-        <TouchableOpacity onPress={() => setMenuVisible(true)}>
+        {/* 👇 OPEN DRAWER (Sidebar) INSTEAD OF MODAL */}
+        <TouchableOpacity onPress={() => navigation.openDrawer()}>
           <Ionicons name="menu" size={32} color="#fff" />
         </TouchableOpacity>
 
         {/* TOP RIGHT LOGIC */}
         <View style={{alignItems: 'flex-end'}}>
             {isSyncing && <Text style={{color:'#666', fontSize: 10, marginBottom: 4}}>SYNCING...</Text>}
-            
-            {selectedJourneyId ? (
-                // MODE A: INSIDE A JOURNEY (Click to go back)
-                <TouchableOpacity onPress={handleBackToHome}>
-                    <Text style={{color:'#888', fontSize:10, fontWeight:'bold', textAlign:'right'}}>CURRENT VIEW</Text>
-                    <View style={{flexDirection:'row', alignItems:'center'}}>
-                        <Ionicons name="arrow-back" size={14} color="#ff4d4d" style={{marginRight: 4}} />
-                        <Text style={{color:'#ff4d4d', fontSize:16, fontWeight:'bold'}}>{headerTitle}</Text>
-                    </View>
-                </TouchableOpacity>
-            ) : (
-                // MODE B: HOME SCREEN
-                <Text style={{color:'#fff', fontWeight:'bold', fontSize: 16}}>My Journeys</Text>
-            )}
+            <Text style={{color:'#fff', fontWeight:'bold', fontSize: 16}}>My Journeys</Text>
         </View>
       </View>
 
       {/* --- CONTENT AREA --- */}
       <View style={styles.content}>
-        
-        {selectedJourneyId ? (
-            // SHOW OVERVIEW COMPONENT
-            <JourneyOverview 
-                journeyId={selectedJourneyId} 
-                onStatusChange={(name) => setHeaderTitle(name)} 
-            />
-        ) : (
-            // SHOW JOURNEY LIST
-            <View style={{flex: 1, width:'100%', padding: 20}}>
-                <FlatList
-                    data={journeys}
-                    keyExtractor={(item) => item.id}
-                    contentContainerStyle={{ gap: 15 }}
-                    renderItem={({ item }) => (
-                        <TouchableOpacity style={styles.card} onPress={() => handleSelectJourney(item)}>
-                            <View>
-                                <Text style={styles.cardTitle}>{item.name}</Text>
-                                <Text style={styles.cardDate}>Race: {item.race_date}</Text>
-                            </View>
-                            <View style={{alignItems:'flex-end'}}>
-                                {item.status === 'creating' ? (
-                                    <ActivityIndicator color="#ff4d4d" />
-                                ) : (
-                                    <Ionicons name="chevron-forward" size={24} color="#666" />
-                                )}
-                            </View>
-                        </TouchableOpacity>
-                    )}
-                    ListEmptyComponent={
-                        <Text style={{color:'#666', textAlign:'center', marginTop: 50}}>No journeys yet.</Text>
-                    }
-                />
+          <View style={{flex: 1, width:'100%', padding: 20}}>
+              <FlatList
+                  data={journeys}
+                  keyExtractor={(item) => item.id}
+                  contentContainerStyle={{ gap: 15 }}
+                  renderItem={({ item }) => (
+                      <TouchableOpacity 
+                        style={styles.card} 
+                        // 👇 USE ROUTER NAVIGATION HERE
+                        onPress={() => navigation.navigate('JourneyDetail', { journeyId: item.id, name: item.name })}
+                      >
+                          <View>
+                              <Text style={styles.cardTitle}>{item.name}</Text>
+                              <Text style={styles.cardDate}>Race: {item.race_date}</Text>
+                          </View>
+                          <View style={{alignItems:'flex-end'}}>
+                              {item.status === 'creating' ? (
+                                  <ActivityIndicator color="#ff4d4d" />
+                              ) : (
+                                  <Ionicons name="chevron-forward" size={24} color="#666" />
+                              )}
+                          </View>
+                      </TouchableOpacity>
+                  )}
+                  ListEmptyComponent={
+                      <Text style={{color:'#666', textAlign:'center', marginTop: 50}}>No journeys yet.</Text>
+                  }
+              />
 
-                {/* FLOATING CREATE BUTTON */}
-                <TouchableOpacity style={styles.fab} onPress={() => setCreateModalVisible(true)}>
-                    <Ionicons name="add" size={30} color="white" />
-                </TouchableOpacity>
-            </View>
-        )}
-
+              {/* FLOATING CREATE BUTTON */}
+              <TouchableOpacity style={styles.fab} onPress={() => setCreateModalVisible(true)}>
+                  <Ionicons name="add" size={30} color="white" />
+              </TouchableOpacity>
+          </View>
       </View>
     </SafeAreaView>
   );
@@ -180,11 +139,4 @@ const styles = StyleSheet.create({
   
   // FAB (Floating Action Button)
   fab: { position: 'absolute', bottom: 30, right: 20, backgroundColor: '#ff4d4d', width: 60, height: 60, borderRadius: 30, justifyContent: 'center', alignItems: 'center', elevation: 5, shadowColor:'#000', shadowOffset:{width:0,height:4}, shadowOpacity:0.3, shadowRadius:4 },
-
-  // Menu
-  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', flexDirection: 'row' },
-  menuContainer: { width: '70%', backgroundColor: '#1a1a1a', height: '100%', padding: 20, paddingTop: 60 },
-  menuHeader: { color: '#666', fontSize: 12, fontWeight: 'bold', marginBottom: 30, letterSpacing: 1 },
-  menuItem: { flexDirection: 'row', alignItems: 'center', marginBottom: 25 },
-  menuText: { color: 'white', fontSize: 18, marginLeft: 15, fontWeight: '500' },
 });

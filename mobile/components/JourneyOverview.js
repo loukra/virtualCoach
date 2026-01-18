@@ -56,7 +56,20 @@ if (workData) setTodaysWorkout(workData.workout_text);
     else setTodaysWorkout(null); // Clear it if empty
   };
 
-  const startPolling = () => { /* ... existing polling logic ... */ };
+const startPolling = () => {
+    if (pollingRef.current) return; // Already polling
+    pollingRef.current = setInterval(async () => {
+      const { data } = await supabase.from('journeys').select('status').eq('id', journeyId).maybeSingle();
+      if (data && data.status === 'active') {
+         clearInterval(pollingRef.current);
+         loadJourney(); // Refresh full data
+      } else if (data && data.status === 'failed') {
+         clearInterval(pollingRef.current);
+         Alert.alert("Error", "Plan generation failed.");
+         setJourney(prev => ({ ...prev, status: 'failed' }));
+      }
+    }, 3000); // Check every 3 seconds
+  };
 
   // --- 2. ACTIONS ---
   const handleGenerateWorkout = async (isRedo = false) => {

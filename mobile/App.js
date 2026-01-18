@@ -2,13 +2,13 @@
 import React from 'react';
 import { StyleSheet, View, Text, ActivityIndicator, TouchableOpacity } from 'react-native';
 import { supabase } from './lib/supabase';
-
+import { NavigationContainer } from '@react-navigation/native'; // 👈 IMPORT THIS
+import 'react-native-gesture-handler'; // 👈 REQUIRED FOR DRAWER
 // Components
 import Auth from './components/Auth';
 import ConnectStrava from './components/connectStrava';
 import SetupProfile from './components/SetupProfile';
-import Dashboard from './screens/Dashboard'; // New file
-
+import AppNavigator from './navigation/AppNavigator';
 // Hooks
 import { useUserOnboarding } from './hooks/useUserOnboarding'; // New file
 
@@ -61,8 +61,11 @@ export default function App() {
     );
   }
 
-  // 4. Dashboard
-  return <Dashboard />;
+return (
+    <NavigationContainer>
+        <AppNavigator />
+    </NavigationContainer>
+  );
 }
 
 const styles = StyleSheet.create({
