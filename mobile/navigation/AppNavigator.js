@@ -1,50 +1,63 @@
 // mobile/navigation/AppNavigator.js
 import React from 'react';
-import { createDrawerNavigator } from '@react-navigation/drawer';
+import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { Ionicons } from '@expo/vector-icons';
-
-// Import your existing screens
+import { View, Text, TouchableOpacity } from 'react-native';
+import { supabase } from '../lib/supabase';
+import ProfileScreen from '../screens/ProfileScreen';
+// Screens
 import Dashboard from '../screens/Dashboard';
+import TrainingPlanView from '../screens/TrainingPlanView'; 
 import JourneyOverview from '../components/JourneyOverview'; 
 
-const Drawer = createDrawerNavigator();
+const Tab = createBottomTabNavigator();
 const Stack = createNativeStackNavigator();
 
-// 1. The Sidebar Menu (Drawer)
-function MainDrawer() {
+// --- 1. THE HOME STACK (Allows navigation while keeping tabs) ---
+function HomeStack() {
   return (
-    <Drawer.Navigator
-      screenOptions={{
-        headerShown: false, // We hide the default header to keep your custom dark theme header
-        drawerStyle: { backgroundColor: '#1a1a1a', width: '75%' },
-        drawerActiveTintColor: '#ff4d4d',
-        drawerInactiveTintColor: '#ddd',
-        drawerType: 'front', // Slides over the content
-      }}
-    >
-      <Drawer.Screen 
-        name="Dashboard" 
-        component={Dashboard} 
-        options={{
-          title: 'Home',
-          drawerIcon: ({color}) => <Ionicons name="home-outline" size={22} color={color} />
-        }}
-      />
-      {/* You can add "Settings" or "Profile" here later */}
-    </Drawer.Navigator>
+    <Stack.Navigator screenOptions={{ headerShown: false }}>
+      <Stack.Screen name="Dashboard" component={Dashboard} />
+      <Stack.Screen name="JourneyDetail" component={JourneyOverview} />
+    </Stack.Navigator>
   );
 }
 
-// 2. The Main Stack (Handles transitions between screens)
+
+// --- 3. THE MAIN TABS ---
 export default function AppNavigator() {
   return (
-    <Stack.Navigator screenOptions={{ headerShown: false }}>
-      {/* The base of the app is the Drawer */}
-      <Stack.Screen name="Main" component={MainDrawer} />
-      
-      {/* Detail screens go here (so they cover the drawer when opened) */}
-      <Stack.Screen name="JourneyDetail" component={JourneyOverview} />
-    </Stack.Navigator>
+    <Tab.Navigator
+      screenOptions={({ route }) => ({
+        headerShown: false, 
+        tabBarStyle: { 
+            backgroundColor: '#1a1a1a', 
+            borderTopColor: '#333',
+            height: 90, 
+            paddingTop: 10,
+        },
+        tabBarActiveTintColor: '#ff4d4d',
+        tabBarInactiveTintColor: '#666',
+        tabBarIcon: ({ focused, color, size }) => {
+            let iconName;
+            if (route.name === 'HomeTab') iconName = focused ? 'home' : 'home-outline';
+            else if (route.name === 'Plan') iconName = focused ? 'calendar' : 'calendar-outline';
+            else if (route.name === 'Profile') iconName = focused ? 'person' : 'person-outline';
+            return <Ionicons name={iconName} size={size} color={color} />;
+        },
+      })}
+    >
+      {/* We point the first tab to "HomeStack" instead of "Dashboard".
+         This means when you click a Journey, you stay inside this tab!
+      */}
+      <Tab.Screen 
+          name="HomeTab" 
+          component={HomeStack} 
+          options={{ title: 'Home' }}
+      />
+      <Tab.Screen name="Plan" component={TrainingPlanView} />
+      <Tab.Screen name="Profile" component={ProfileScreen} />
+    </Tab.Navigator>
   );
 }

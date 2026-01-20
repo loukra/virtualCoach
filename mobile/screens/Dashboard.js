@@ -12,13 +12,13 @@ import { Ionicons } from '@expo/vector-icons';
 import { supabase } from '../lib/supabase';
 import { API_URL } from '../constants'; 
 import CreateJourneyModal from '../components/CreateJourneyModal';
-
+import { useJourney } from '../context/JourneyContext';
 // 👇 IMPORT NAVIGATION HOOK
 import { useNavigation } from '@react-navigation/native';
 
 export default function Dashboard() {
-  const navigation = useNavigation(); // 👈 Hook to control navigation
-  
+  const navigation = useNavigation();
+  const { setActiveJourneyId } = useJourney();
   const [journeys, setJourneys] = useState([]);
   const [isSyncing, setIsSyncing] = useState(false);
   const [createModalVisible, setCreateModalVisible] = useState(false);
@@ -54,7 +54,9 @@ export default function Dashboard() {
         await fetch(`${API_URL}/sync`, { 
             method: 'POST', 
             headers: { 'Content-Type': 'application/json' }, 
-            body: JSON.stringify({ user_id: userId }) 
+            body: JSON.stringify({ user_id: userId,
+              days_back: 7
+             }) 
         }); 
     }
     catch (e) {
@@ -72,14 +74,16 @@ export default function Dashboard() {
     <SafeAreaView style={styles.container}>
       <CreateJourneyModal visible={createModalVisible} onClose={() => setCreateModalVisible(false)} onJourneyCreated={handleJourneyCreated} />
 
-      {/* --- HEADER --- */}
+      {/* --- HEADER (Updated for Bottom Tabs) --- */}
       <View style={styles.header}>
-        {/* 👇 OPEN DRAWER (Sidebar) INSTEAD OF MODAL */}
-        <TouchableOpacity onPress={() => navigation.openDrawer()}>
-          <Ionicons name="menu" size={32} color="#fff" />
-        </TouchableOpacity>
+        
+        {/* Left Side: Brand Logo (Replaces Burger Menu) */}
+        <View style={{flexDirection:'row', alignItems:'center'}}>
+            <Ionicons name="bicycle" size={24} color="#ff4d4d" style={{marginRight: 10}}/>
+            <Text style={{color:'#fff', fontWeight:'bold', fontSize: 18}}>VELO AI</Text>
+        </View>
 
-        {/* TOP RIGHT LOGIC */}
+        {/* Right Side: Sync Status */}
         <View style={{alignItems: 'flex-end'}}>
             {isSyncing && <Text style={{color:'#666', fontSize: 10, marginBottom: 4}}>SYNCING...</Text>}
             <Text style={{color:'#fff', fontWeight:'bold', fontSize: 16}}>My Journeys</Text>
@@ -96,8 +100,11 @@ export default function Dashboard() {
                   renderItem={({ item }) => (
                       <TouchableOpacity 
                         style={styles.card} 
-                        // 👇 USE ROUTER NAVIGATION HERE
-                        onPress={() => navigation.navigate('JourneyDetail', { journeyId: item.id, name: item.name })}
+                        // 👇 Navigate to the Journey Detail screen
+                        onPress={() => {
+                    setActiveJourneyId(item.id); // 👈 UPDATE GLOBAL ID
+                    navigation.navigate('JourneyDetail', { journeyId: item.id, name: item.name });
+                }}
                       >
                           <View>
                               <Text style={styles.cardTitle}>{item.name}</Text>

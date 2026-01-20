@@ -48,11 +48,6 @@ const fetchJourneyStatus = async () => {
     Alert.alert("Coming Soon", "Journey Wizard");
   };
 
-  // 👇 UPDATED FUNCTION
-  const toggleMenu = () => {
-    navigation.openDrawer(); // This opens the sidebar!
-  };
-
   return (
     <View style={styles.container}>
       {/* ... (Keep your existing JSX exactly the same) ... */}

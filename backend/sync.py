@@ -247,6 +247,175 @@ def fetch_past_activities(user_id: str, days_back=90):
 
     print(f"\n✅ SYNC COMPLETE. Processed {count} activities.")
 
+
+def backfill_missing_activities(user_id: str, days_back=90):
+    print(f"--- 🕵️ STARTING GAP-FILL SYNC FOR {user_id} (Last {days_back} days) ---")
+    
+    # 1. SETUP: Get Profile & FTP History (Same as before)
+    # We need this to calculate correct TSS for old rides
+    user_profile = supabase.table("profiles").select("ftp, max_heart_rate").eq("id", user_id).execute()
+    
+    if user_profile.data:
+        current_ftp = user_profile.data[0]['ftp']
+        user_max_hr = user_profile.data[0].get('max_heart_rate') or 190 
+    else:
+        current_ftp = 200
+        user_max_hr = 190
+
+    # Get Historical FTP changes so we use the correct FTP for old rides
+    hist_res = supabase.table("athlete_history")\
+        .select("ftp, valid_from")\
+        .eq("user_id", user_id)\
+        .order("valid_from", desc=True)\
+        .execute()
+    history_list = hist_res.data if hist_res.data else []
+
+    # 2. AUTHENTICATE
+    from auth import get_valid_token 
+    try:
+        token = get_valid_token(user_id)
+    except Exception as e:
+        print(f"Skipping: {e}")
+        return
+    client = Client(access_token=token)
+
+    # 3. FETCH LISTS TO COMPARE
+    start_date = datetime.now() - timedelta(days=days_back)
+    print(f"📅 Looking for gaps since: {start_date.strftime('%Y-%m-%d')}")
+
+    # A. Get IDs we ALREADY have in DB (to avoid duplicates)
+    # This prevents us from re-processing rides we already have
+    existing_rides_query = supabase.table("activities")\
+        .select("id")\
+        .eq("user_id", user_id)\
+        .gte("start_date", start_date.isoformat())\
+        .execute()
+    
+    # Create a "Set" for instant lookup (O(1) complexity)
+    existing_ids = {item['id'] for item in existing_rides_query.data}
+    print(f"💾 Database contains {len(existing_ids)} rides in this period.")
+
+    # B. Get list from Strava
+    strava_activities = client.get_activities(after=start_date)
+
+    # 4. LOOP AND FILL GAPS
+    processed_count = 0
+    skipped_count = 0
+
+    for act in strava_activities:
+        # CHECK 1: Is it a Ride?
+        if act.type != "Ride" and act.type != "VirtualRide":
+            continue
+
+        # CHECK 2: Do we already have it? (The Gap-Fill Magic ✨)
+        if act.id in existing_ids:
+            skipped_count += 1
+            continue # Skip immediately, don't fetch streams
+
+        # --- IF WE ARE HERE, IT IS A MISSING RIDE. FETCH IT! ---
+        print(f"📥 Found Missing Ride: {act.name} ({act.start_date.date()})")
+
+        # 1. Lookup FTP for that specific date
+        ride_ftp = get_ftp_for_date(act.start_date.isoformat(), history_list, current_ftp)
+
+        # 2. Get Streams (This is the "expensive" API call)
+        try:
+            streams = client.get_activity_streams(
+                act.id, 
+                types=['watts', 'heartrate', 'velocity_smooth'], 
+                resolution='high'
+            )
+            time.sleep(0.5) # 👈 Important: Sleep to respect rate limits during bulk sync
+        except Exception as e:
+            print(f"   ⚠️ Stream Error: {e}")
+            streams = {}
+
+        # 3. Calculate Metrics (Same logic as your original code)
+        np_val = 0
+        avg_watts = 0
+        max_watts = 0
+        vi = 0.0
+        avg_hr = 0
+        max_hr = 0
+        ef = 0
+
+        # -- Power --
+        if 'watts' in streams:
+            raw_watts = np.array([x if x is not None else 0 for x in streams['watts'].data])
+            watts_data = clean_power_spikes(raw_watts, ride_ftp) # Assuming you have this helper
+            if len(watts_data) > 0:
+                avg_watts = float(np.mean(watts_data))
+                max_watts = int(np.max(watts_data))
+                np_val = calculate_normalized_power(watts_data) # Assuming helper
+                if avg_watts > 0: vi = round(np_val / avg_watts, 2)
+
+        # -- HR --
+        if 'heartrate' in streams:
+            hr_data = np.array([x if x is not None else 0 for x in streams['heartrate'].data])
+            valid_hr = hr_data[hr_data > 0]
+            if len(valid_hr) > 0:
+                avg_hr = float(np.mean(valid_hr))
+                max_hr = int(np.max(valid_hr))
+        
+        if avg_hr > 0:
+            ef = calculate_efficiency_factor(np_val, avg_hr) # Assuming helper
+
+        # 4. Calculate TSS (Waterfall Logic)
+        moving_time_sec = int(act.moving_time) # StravaLib returns timedelta
+        elapsed_time_sec = int(act.elapsed_time)
+        
+        tss = 0
+        source = "Est"
+
+        if np_val > 0:
+            tss = calculate_tss_from_stream(moving_time_sec, np_val, ride_ftp)
+            source = "Power"
+        elif getattr(act, 'suffer_score', None):
+            tss = act.suffer_score
+            source = "Strava"
+        elif avg_hr > 0:
+            # HR Calc Fallback
+            estimated_lthr = user_max_hr * 0.91
+            hr_if = min((avg_hr / estimated_lthr), 1.1)
+            hours = moving_time_sec / 3600
+            tss = int(hours * (hr_if * hr_if) * 100 / 1.375)
+            source = "HR"
+        else:
+            hours = moving_time_sec / 3600
+            tss = int(hours * 50) # Just guessing
+
+        # 5. Save to DB
+        ride_data = {
+            "id": act.id,
+            "user_id": user_id,
+            "start_date": act.start_date.isoformat(),
+            "name": act.name,
+            "duration_seconds": elapsed_time_sec,
+            "moving_time": moving_time_sec,
+            "tss": int(tss),
+            "average_watts": round(avg_watts, 1),
+            "weighted_average_watts": int(np_val),
+            "max_watts": max_watts,
+            "variability_index": vi,
+            "average_heartrate": round(avg_hr, 1),
+            "max_heartrate": max_hr,
+            "efficiency_factor": ef,
+            "elevation_gain": int(act.total_elevation_gain) if act.total_elevation_gain else 0,
+            "calories": getattr(act, 'kilojoules', 0) or 0
+        }
+
+        try:
+            supabase.table("activities").upsert(ride_data).execute()
+            print(f"   ✅ Processed & Saved: {act.name} (TSS: {int(tss)})")
+            processed_count += 1
+        except Exception as e:
+            print(f"   ❌ DB Save Error: {e}")
+
+    print(f"\n🏁 BACKFILL COMPLETE.")
+    print(f"   - Skipped (Already Existed): {skipped_count}")
+    print(f"   - Processed (Newly Added): {processed_count}")
+
+
 if __name__ == "__main__":
     user_id = login_user()
     fetch_past_activities(user_id)

@@ -24,3 +24,4 @@ class ConnectRequest(BaseModel):
 
 class SyncRequest(BaseModel):
     user_id: str
+    days_back: int = 7

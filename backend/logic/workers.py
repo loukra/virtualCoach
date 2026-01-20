@@ -1,7 +1,7 @@
 from datetime import timedelta
 from core.db import supabase
 from auth import exchange_code_for_token
-from sync import fetch_past_activities
+from sync import backfill_missing_activities
 from analysis import calculate_daily_metrics
 from logic.ai_planner import generate_ai_plan_logic
 
@@ -73,7 +73,7 @@ def run_onboarding_process(user_id: str, code: str):
 
         # C. Download History (The slow part)
         print(f"   -> Fetching History...")
-        fetch_past_activities(user_id, days_back=10)
+        backfill_missing_activities(user_id, days_back=90)
         calculate_daily_metrics(user_id)
 
         # E. Update DB Status -> 'completed'
@@ -85,11 +85,11 @@ def run_onboarding_process(user_id: str, code: str):
         # Update DB Status -> 'failed' so the App can show an error message
         supabase.table("profiles").update({"sync_status": "failed"}).eq("id", user_id).execute()
 
-def run_daily_sync(user_id: str):
+def run_sync(user_id: str, days_back: int = 7):
     print(f"🔄 [Background] Syncing daily activities for {user_id}...")
     try:
         # 1. Fetch only recent history (last 3 days is enough for daily)
-        fetch_past_activities(user_id, days_back=10)
+        backfill_missing_activities(user_id, days_back)
         
         # 2. Recalculate metrics
         calculate_daily_metrics(user_id)

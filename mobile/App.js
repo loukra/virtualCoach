@@ -11,6 +11,7 @@ import SetupProfile from './components/SetupProfile';
 import AppNavigator from './navigation/AppNavigator';
 // Hooks
 import { useUserOnboarding } from './hooks/useUserOnboarding'; // New file
+import { JourneyProvider } from './context/JourneyContext';
 
 export default function App() {
   // 1. All logic is now hidden inside this one line
@@ -62,9 +63,11 @@ export default function App() {
   }
 
 return (
+  <JourneyProvider>
     <NavigationContainer>
         <AppNavigator />
     </NavigationContainer>
+  </JourneyProvider>
   );
 }
 
