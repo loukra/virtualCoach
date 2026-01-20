@@ -2,13 +2,13 @@ import React, { useState, useCallback } from 'react';
 import { 
   View, 
   Text, 
-  FlatList, 
   StyleSheet, 
   ActivityIndicator, 
   TouchableOpacity, 
   Dimensions, 
   Modal,
-  ScrollView
+  ScrollView,
+  SectionList // 👈 We use SectionList now!
 } from 'react-native';
 import { supabase } from '../lib/supabase';
 import { Ionicons } from '@expo/vector-icons';
@@ -16,9 +16,8 @@ import { useFocusEffect } from '@react-navigation/native';
 import { useJourney } from '../context/JourneyContext'; 
 
 const SCREEN_WIDTH = Dimensions.get('window').width;
-// 7 Columns. Subtracting padding (20px total) to fit screen.
-const TILE_SIZE = (SCREEN_WIDTH - 20) / 7; 
-
+// 7 Columns with a little margin
+const TILE_SIZE = (SCREEN_WIDTH - 32) / 7; 
 const DAY_LABELS = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
 
 export default function TrainingPlanView() {
@@ -26,7 +25,9 @@ export default function TrainingPlanView() {
   
   const [loading, setLoading] = useState(true);
   const [journey, setJourney] = useState(null);
-  const [gridData, setGridData] = useState([]);
+  
+  // Data is now an array of Sections: { title: "JANUARY", data: [ ...days ] }
+  const [sections, setSections] = useState([]);
   
   const [allJourneys, setAllJourneys] = useState([]);
   const [showSelector, setShowSelector] = useState(false);
@@ -54,7 +55,7 @@ export default function TrainingPlanView() {
       // 1. Fetch Journeys
       const { data: userJourneys } = await supabase
         .from('journeys')
-        .select('id, name')
+        .select('id, name, start_date')
         .eq('user_id', session.user.id)
         .in('status', ['active', 'creating']) 
         .order('created_at', { ascending: false });
@@ -71,18 +72,25 @@ export default function TrainingPlanView() {
       }
       setJourney(targetJourney);
 
-      // 2. Fetch Recent Activities
-      const { data: activities } = await supabase
+      // 2. Fetch Activities (History)
+      let query = supabase
         .from('activities')
         .select('*')
         .eq('user_id', session.user.id)
-        .order('start_date', { ascending: false })
-        .limit(60);
+        .order('start_date', { ascending: false });
 
+      if (targetJourney && targetJourney.start_date) {
+           query = query.gte('start_date', targetJourney.start_date);
+      } else {
+           const ninetyDaysAgo = new Date();
+           ninetyDaysAgo.setDate(ninetyDaysAgo.getDate() - 90);
+           query = query.gte('start_date', ninetyDaysAgo.toISOString());
+      }
+      const { data: activities } = await query;
+
+      // 3. Fetch Plan & Merge
       let mergedList = [];
-
       if (targetJourney) {
-        // 3. Fetch Master Plan
         const { data: masterPlan } = await supabase
             .from('master_plan')
             .select('*')
@@ -92,42 +100,59 @@ export default function TrainingPlanView() {
         if (masterPlan) {
             mergedList = masterPlan.map(planItem => {
                 const planDate = planItem.date; 
-                const matchedActivity = activities?.find(act => {
-                    if (!act.start_date) return false;
-                    const actDate = act.start_date.split('T')[0]; 
-                    return actDate === planDate;
-                });
-
+                const matchedActivity = activities?.find(act => 
+                    act.start_date && act.start_date.split('T')[0] === planDate
+                );
                 return {
                     id: planItem.id,
-                    date: planItem.date,
+                    date: planItem.date, // YYYY-MM-DD
                     status: matchedActivity ? 'completed' : 'planned',
                     planDetail: planItem,           
                     activityDetail: matchedActivity
                 };
             });
         }
-      } 
+      }
       
+      // Sort global list first
       mergedList.sort((a, b) => new Date(a.date) - new Date(b.date));
 
-      // --- CALENDAR ALIGNMENT LOGIC ---
-      // We need to insert empty "ghost" tiles at the start so Monday is Col 1.
-      if (mergedList.length > 0) {
-          const firstDate = new Date(mergedList[0].date);
-          // getDay() returns 0 (Sun) to 6 (Sat). We want 0 (Mon) to 6 (Sun).
-          let dayOfWeek = firstDate.getDay(); 
-          // Convert to Monday-index (Mon=0, Tue=1, ... Sun=6)
-          let mondayIndex = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
+      // --- 4. GROUP BY MONTH (The Magic Step) ---
+      const groupedData = {};
+
+      mergedList.forEach(item => {
+          // Extract "2026-01"
+          const monthKey = item.date.substring(0, 7); 
+          if (!groupedData[monthKey]) {
+              groupedData[monthKey] = [];
+          }
+          groupedData[monthKey].push(item);
+      });
+
+      // Convert Group Object to SectionList Array
+      const sectionArray = Object.keys(groupedData).sort().map(monthKey => {
+          const daysInMonth = groupedData[monthKey];
+          
+          // Calculate Padding for this specific month
+          const firstDayDate = new Date(daysInMonth[0].date);
+          let dayOfWeek = firstDayDate.getDay(); // 0=Sun, 1=Mon...
+          let mondayIndex = dayOfWeek === 0 ? 6 : dayOfWeek - 1; // Convert to Mon=0
 
           const padding = [];
           for (let i = 0; i < mondayIndex; i++) {
-              padding.push({ id: `pad-${i}`, type: 'empty' });
+              padding.push({ id: `pad-${monthKey}-${i}`, type: 'empty' });
           }
-          mergedList = [...padding, ...mergedList];
-      }
 
-      setGridData(mergedList);
+          // Format Month Title (e.g., "JANUARY 2026")
+          const monthTitle = firstDayDate.toLocaleString('default', { month: 'long', year: 'numeric' }).toUpperCase();
+
+          return {
+              title: monthTitle,
+              data: [...padding, ...daysInMonth] // Add padding to the start of data
+          };
+      });
+
+      setSections(sectionArray);
 
     } catch (e) {
       console.log(e);
@@ -136,41 +161,63 @@ export default function TrainingPlanView() {
     }
   };
 
-  const renderTile = ({ item }) => {
-    // A. Empty Alignment Tile
-    if (item.type === 'empty') {
-        return <View style={styles.tileInvisible} />;
-    }
+  // --- RENDER SINGLE TILE ---
+  const renderTile = ({ item, index }) => {
+    // We wrap tiles in a View to force the grid layout inside the SectionList
+    // However, SectionList renders items in rows by default. 
+    // Trick: We will actually render the GRID inside the Section Header, or just use flexWrap.
+    
+    // BETTER APPROACH FOR SECTION LIST GRID:
+    // SectionList doesn't support 'numColumns'.
+    // So we must simply render the tiles, but they will stack vertically unless we do the "Row of 7" trick.
+    // BUT simpler: Use a FlatList of Months.
+    return null; // See below for the actual render strategy
+  };
+
+  // --- ACTUAL RENDER STRATEGY: List of Months ---
+  // We use a simple FlatList where each ITEM is a whole MONTH.
+  const renderMonthBlock = ({ item }) => {
+      return (
+          <View style={styles.monthContainer}>
+              <Text style={styles.monthHeader}>{item.title}</Text>
+              
+              <View style={styles.monthGrid}>
+                  {item.data.map((dayItem, idx) => (
+                      <View key={dayItem.id || idx}>
+                          {renderDayContent(dayItem)}
+                      </View>
+                  ))}
+              </View>
+          </View>
+      );
+  };
+
+  const renderDayContent = (item) => {
+    if (item.type === 'empty') return <View style={styles.tileInvisible} />;
 
     const isRest = item.planDetail?.planned_workout_type === 'Rest';
     const isCompleted = item.status === 'completed';
-    const dateNum = item.date.split('-')[2]; // Get "20" from "2026-01-20"
+    const dateNum = item.date.split('-')[2];
 
-    // B. COMPLETED (Green)
     if (isCompleted) {
         return (
             <TouchableOpacity style={[styles.tile, styles.completedTile]} onPress={() => setSelectedTile(item)}>
-                <Text style={styles.miniDate}>{dateNum}</Text>
-                <Ionicons name="checkmark" size={16} color="black" />
+                <Text style={[styles.miniDate, styles.pastelText]}>{dateNum}</Text>
+                <Ionicons name="checkmark" size={16} color="#1a1a1a" /> 
             </TouchableOpacity>
         );
     }
-
-    // C. REST (Grey Outline)
     if (isRest) {
         return (
             <TouchableOpacity style={[styles.tile, styles.restTile]} onPress={() => setSelectedTile(item)}>
-                <Text style={[styles.miniDate, {color:'#666'}]}>{dateNum}</Text>
+                <Text style={[styles.miniDate, {color:'#444'}]}>{dateNum}</Text>
                 <View style={styles.dotRest} />
             </TouchableOpacity>
         );
     }
-
-    // D. PLANNED (Red Dot)
     return (
         <TouchableOpacity style={styles.tile} onPress={() => setSelectedTile(item)}>
             <Text style={styles.miniDate}>{dateNum}</Text>
-            {/* Visual Indicator of workout type */}
             <View style={styles.dotPlanned} />
         </TouchableOpacity>
     );
@@ -189,24 +236,24 @@ export default function TrainingPlanView() {
         </TouchableOpacity>
       </View>
 
-      {/* DAYS HEADER (M T W T F S S) */}
+      {/* WEEK DAYS HEADER (Sticky) */}
       <View style={styles.daysHeader}>
           {DAY_LABELS.map((d, i) => (
               <Text key={i} style={styles.dayLabelText}>{d}</Text>
           ))}
       </View>
 
-      {/* CALENDAR GRID */}
-      <FlatList
-        data={gridData}
-        keyExtractor={(item) => item.id.toString()}
-        renderItem={renderTile}
-        numColumns={7} // 👈 7 Columns for the week
-        contentContainerStyle={{ paddingHorizontal: 10, paddingBottom: 20 }}
-        columnWrapperStyle={{ gap: 0 }} // Remove gap, handle via padding in tile
-      />
+      {/* MONTHS LIST */}
+      <ScrollView contentContainerStyle={{ paddingBottom: 40 }}>
+          {sections.map((monthSection, index) => (
+              renderMonthBlock({ item: monthSection, index })
+          ))}
+          {sections.length === 0 && (
+              <Text style={{color:'#666', textAlign:'center', marginTop:50}}>No plan data found.</Text>
+          )}
+      </ScrollView>
 
-      {/* --- SELECTOR MODAL --- */}
+      {/* MODALS (Keep existing ones exactly same) */}
       <Modal visible={showSelector} transparent animationType="fade" onRequestClose={() => setShowSelector(false)}>
          <TouchableOpacity style={styles.modalOverlay} activeOpacity={1} onPress={() => setShowSelector(false)}>
             <View style={styles.modalContent}>
@@ -228,7 +275,6 @@ export default function TrainingPlanView() {
          </TouchableOpacity>
       </Modal>
 
-      {/* --- DETAIL POPUP --- */}
       <Modal visible={!!selectedTile} transparent animationType="slide" onRequestClose={() => setSelectedTile(null)}>
          <View style={styles.detailOverlay}>
             <View style={styles.detailContent}>
@@ -239,8 +285,6 @@ export default function TrainingPlanView() {
                 {selectedTile && (
                   <ScrollView>
                     <Text style={styles.detailDate}>{selectedTile.date}</Text>
-
-                    {/* PLAN */}
                     <View style={styles.detailSection}>
                         <Text style={styles.sectionHeader}>📋 PLAN</Text>
                         {selectedTile.planDetail?.planned_workout_type === 'Rest' ? (
@@ -249,15 +293,13 @@ export default function TrainingPlanView() {
                             <View>
                                 <Text style={styles.detailTitle}>{selectedTile.planDetail?.planned_workout_type}</Text>
                                 <Text style={styles.detailSub}>{selectedTile.planDetail?.planned_duration_min} min target</Text>
-                                <Text style={styles.detailBody}>{selectedTile.planDetail?.description}</Text>
+                                <Text style={styles.detailBody}>{selectedTile.planDetail?.workout_text}</Text>
                             </View>
                         )}
                     </View>
-
-                    {/* ACTUAL */}
                     {selectedTile.activityDetail && (
                         <View style={[styles.detailSection, {borderTopWidth:1, borderTopColor:'#333', marginTop:20, paddingTop:20}]}>
-                            <Text style={[styles.sectionHeader, {color:'#4dff4d'}]}>✅ DONE</Text>
+                            <Text style={[styles.sectionHeader, {color:'#A7F3D0'}]}>✅ DONE</Text>
                             <Text style={styles.detailTitle}>{selectedTile.activityDetail.name}</Text>
                             <View style={styles.statsGrid}>
                                 <View style={styles.statBox}><Text style={styles.statLabel}>TIME</Text><Text style={styles.statValue}>{formatTime(selectedTile.activityDetail.moving_time)}</Text></View>
@@ -283,33 +325,38 @@ const styles = StyleSheet.create({
   subtitle: { color: '#ff4d4d', fontSize: 10, fontWeight: 'bold', letterSpacing: 1, textTransform: 'uppercase' },
 
   // --- DAYS HEADER ---
-  daysHeader: { flexDirection: 'row', paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: '#222', paddingHorizontal: 10 },
+  daysHeader: { flexDirection: 'row', paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: '#222', paddingHorizontal: 16 }, // Matched padding
   dayLabelText: { width: TILE_SIZE, textAlign: 'center', color: '#666', fontSize: 10, fontWeight: 'bold' },
 
-  // --- MINIMAL TILES ---
+  // --- MONTH BLOCKS ---
+  monthContainer: { marginBottom: 20, paddingHorizontal: 16 },
+  monthHeader: { color: 'white', fontSize: 14, fontWeight: 'bold', marginBottom: 10, marginTop: 10, letterSpacing: 1 },
+  monthGrid: { flexDirection: 'row', flexWrap: 'wrap' }, // 👈 This makes the grid work!
+
+  // --- TILES ---
   tile: { 
       width: TILE_SIZE, 
-      height: TILE_SIZE, // Square
+      height: TILE_SIZE, 
       justifyContent: 'center', 
       alignItems: 'center',
       borderWidth: 1,
-      borderColor: '#222', // Subtle grid lines
-      backgroundColor: '#151515'
+      borderColor: '#222', 
+      backgroundColor: '#151515', 
+      marginVertical: -0.5, 
+      marginHorizontal: -0.5
   },
-  tileInvisible: { width: TILE_SIZE, height: TILE_SIZE, backgroundColor: 'transparent' }, // For padding
+  tileInvisible: { width: TILE_SIZE, height: TILE_SIZE, backgroundColor: 'transparent' },
   
-completedTile: { 
-      backgroundColor: '#A7F3D0', // Darker, natural green
-      borderColor: '#1b5e20'     // Subtle border
-  },
-  restTile: { backgroundColor: '#000' },
+  // Pastel Look
+  completedTile: { backgroundColor: '#A7F3D0', borderColor: '#A7F3D0', opacity: 0.9 },
+  pastelText: { color: '#1a1a1a', opacity: 0.6 },
+  restTile: { backgroundColor: '#0a0a0a', borderColor: '#111' },
   
-  miniDate: { fontSize: 10, fontWeight: 'bold', color: '#888', position: 'absolute', top: 4, right: 4 },
-  
-  dotPlanned: { width: 8, height: 8, borderRadius: 4, backgroundColor: '#ff4d4d' },
+  miniDate: { fontSize: 10, fontWeight: 'bold', color: '#555', position: 'absolute', top: 4, right: 4 },
+  dotPlanned: { width: 6, height: 6, borderRadius: 3, backgroundColor: '#FF8A80' }, 
   dotRest: { width: 4, height: 4, borderRadius: 2, backgroundColor: '#333' },
 
-  // --- MODAL / DETAILS ---
+  // --- MODALS (Same) ---
   modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.8)', justifyContent: 'center', alignItems: 'center' },
   modalContent: { width: '80%', backgroundColor: '#222', borderRadius: 12, padding: 20 },
   modalTitle: { color: 'white', fontSize: 16, fontWeight: 'bold', marginBottom: 15, textAlign:'center' },
