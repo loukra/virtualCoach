@@ -10,6 +10,11 @@ import { localDateString } from '../lib/dates';
 import { parseNumber, LIMITS, rangeMessage } from '../lib/numbers';
 
 const DEFAULT_PLAN_WEEKS = 12;
+const WEEK_OPTIONS = [8, 12, 16, 20];
+const GOALS = [
+  { key: 'build', label: 'Build fitness', hint: 'Raise your FTP over the coming weeks, with FTP tests to see it work.' },
+  { key: 'race', label: 'Prepare for a race', hint: 'Peak and taper for an event on a fixed date.' },
+];
 
 function weeksFromNow(weeks) {
   const d = new Date();
@@ -18,6 +23,8 @@ function weeksFromNow(weeks) {
 }
 
 export default function CreateJourneyModal({ visible, onClose, onJourneyCreated }) {
+  const [goalType, setGoalType] = useState('build');
+  const [weeks, setWeeks] = useState(16);
   const [name, setName] = useState('');
   const [ftp, setFtp] = useState('200');
   const [weight, setWeight] = useState('75');
@@ -36,7 +43,6 @@ export default function CreateJourneyModal({ visible, onClose, onJourneyCreated 
   const fetchStats = async () => {
     try {
         const me = await apiGet('/me');
-        if (me.goal) setName((current) => current || me.goal);
         setFtp(me.ftp ? me.ftp.toString() : '200');
         setWeight(me.weight_kg ? me.weight_kg.toString() : '75');
     } catch (e) {
@@ -45,9 +51,11 @@ export default function CreateJourneyModal({ visible, onClose, onJourneyCreated 
   };
 
   const handleCreate = async () => {
-    if (!name.trim()) return Alert.alert("Missing info", "Please enter a name for your goal.");
+    const isRace = goalType === 'race';
+    const title = name.trim() || (isRace ? '' : `${weeks} weeks of fitness`);
+    if (!title) return Alert.alert("Missing info", "Please enter the name of your race.");
     const days = Math.round((raceDate - startDate) / 86400000);
-    if (days < 6) return Alert.alert("Check the dates", "The race date must be at least one week after the start date.");
+    if (isRace && days < 6) return Alert.alert("Check the dates", "The race date must be at least one week after the start date.");
     const ftpValue = parseNumber(ftp, LIMITS.ftp);
     if (ftpValue === null) return Alert.alert("Check the value", rangeMessage('ftp'));
     const weightValue = parseNumber(weight, LIMITS.weight);
@@ -56,8 +64,9 @@ export default function CreateJourneyModal({ visible, onClose, onJourneyCreated 
     setLoading(true);
     try {
         await apiPost('/create-journey', {
-            journey_name: name.trim(),
-            race_date: localDateString(raceDate),
+            journey_name: title,
+            goal_type: goalType,
+            ...(isRace ? { race_date: localDateString(raceDate) } : { weeks }),
             start_date: localDateString(startDate),
             current_ftp: ftpValue,
             current_weight: weightValue
@@ -137,28 +146,52 @@ export default function CreateJourneyModal({ visible, onClose, onJourneyCreated 
                 <TouchableOpacity onPress={onClose}><Text style={{color:'#666', fontSize: 20}}>✕</Text></TouchableOpacity>
               </View>
 
-              <Text style={styles.label}>Goal Name</Text>
+              <View style={styles.segment}>
+                {GOALS.map((g) => (
+                  <TouchableOpacity
+                    key={g.key}
+                    style={[styles.segmentBtn, goalType === g.key && styles.segmentActive]}
+                    onPress={() => setGoalType(g.key)}
+                  >
+                    <Text style={[styles.segmentText, goalType === g.key && { color: 'white' }]}>{g.label}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+              <Text style={styles.goalHint}>{GOALS.find((g) => g.key === goalType).hint}</Text>
+
+              <Text style={styles.label}>{goalType === 'race' ? 'Race' : 'Name (optional)'}</Text>
               <TextInput 
                 style={styles.input} 
-                placeholder="e.g. Gran Fondo 2026" 
+                placeholder={goalType === 'race' ? 'e.g. Gran Fondo 2027' : `${weeks} weeks of fitness`}
                 placeholderTextColor="#666"
                 value={name} onChangeText={setName} 
                 returnKeyType="done"
               />
 
-              {/* 🗓️ START DATE (When did you start training?) */}
               <DateInput 
-                 label="Training start" 
+                 label="Start" 
                  dateValue={startDate} 
                  pickerType="start" 
               />
 
-              {/* 🏁 RACE DATE */}
-              <DateInput 
-                 label="Race / goal date" 
-                 dateValue={raceDate} 
-                 pickerType="race" 
-              />
+              {goalType === 'race' ? (
+                <DateInput 
+                   label="Race date" 
+                   dateValue={raceDate} 
+                   pickerType="race" 
+                />
+              ) : (
+                <View style={{ marginBottom: 15 }}>
+                  <Text style={styles.label}>Weeks</Text>
+                  <View style={styles.weekChips}>
+                    {WEEK_OPTIONS.map((w) => (
+                      <TouchableOpacity key={w} style={[styles.weekChip, weeks === w && styles.segmentActive]} onPress={() => setWeeks(w)}>
+                        <Text style={[styles.segmentText, weeks === w && { color: 'white' }]}>{w}</Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                </View>
+              )}
 
               <View style={{flexDirection:'row', gap: 10, marginTop: 5}}>
                 <View style={{flex:1}}>
@@ -197,6 +230,13 @@ const styles = StyleSheet.create({
   input: { backgroundColor: '#333', color: 'white', padding: 14, borderRadius: 8, fontSize: 16 },
   dateButton: { backgroundColor: '#333', padding: 14, borderRadius: 8, alignItems:'center' },
   activeInput: { borderWidth: 1, borderColor: '#ff4d4d' }, // Highlight active picker
+  segment: { flexDirection: 'row', backgroundColor: '#333', borderRadius: 10, padding: 3 },
+  segmentBtn: { flex: 1, paddingVertical: 10, borderRadius: 8, alignItems: 'center' },
+  segmentActive: { backgroundColor: '#ff4d4d' },
+  segmentText: { color: '#aaa', fontWeight: 'bold' },
+  goalHint: { color: '#888', fontSize: 12, marginTop: 8, lineHeight: 17 },
+  weekChips: { flexDirection: 'row', gap: 8 },
+  weekChip: { flex: 1, backgroundColor: '#333', paddingVertical: 12, borderRadius: 8, alignItems: 'center' },
   iosPickerContainer: { backgroundColor: '#222', borderRadius: 8, marginTop: 5, overflow: 'hidden' },
   buttons: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 25, alignItems:'center' },
   cancelBtn: { padding: 15 },

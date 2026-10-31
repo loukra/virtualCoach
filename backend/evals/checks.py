@@ -5,7 +5,7 @@ go further and are only run in the evals, because they judge coaching intent, wh
 miss is a signal to look at the prompt, not a reason to reject a workout in the app.
 Each function returns a list of problems in plain language; an empty list means it passed.
 """
-from logic.guardrails import RECOVERY_MAX_POWER
+from logic.guardrails import RECOVERY_MAX_POWER, build_peak_tss
 from logic.schemas import PlanDay, Workout
 from logic.workout_math import estimate_tss, step_segments
 
@@ -73,9 +73,15 @@ def workout_checks(
     return problems
 
 
-def plan_checks(days: list[PlanDay], current_ctl: float) -> list[str]:
-    """Shape of a whole plan: sensible start, a build, a taper, not too many hard days."""
+def plan_checks(
+    days: list[PlanDay], current_ctl: float, goal_type: str = "race", test_days: list[int] = ()
+) -> list[str]:
+    """Shape of a whole plan: sensible start, a build, not too many hard days; a race plan
+    tapers, a fitness plan keeps its FTP tests and enough quality work to raise FTP."""
     problems: list[str] = []
+    tests = [d.day_number for d in days if d.planned_workout_type == "FTP Test"]
+    if tests != list(test_days):
+        problems.append(f"FTP tests on days {tests}, expected {list(test_days)}")
     weeks = [days[i : i + 7] for i in range(0, len(days), 7)]
     full_weeks = [w for w in weeks if len(w) == 7]
     weekly_tss = [sum(d.planned_tss for d in w) for w in full_weeks]
@@ -88,6 +94,13 @@ def plan_checks(days: list[PlanDay], current_ctl: float) -> list[str]:
         problems.append(f"first week has {weekly_tss[0]} TSS, current fitness suggests about {usual:.0f}")
     if max(weekly_tss) < 1.1 * weekly_tss[0]:
         problems.append("load never builds above the first week")
+    for number, week in enumerate(full_weeks, start=1):
+        hard = sum(d.planned_workout_type in HARD_TYPES for d in week)
+        if hard > 3:
+            problems.append(f"week {number} has {hard} hard days")
+    if goal_type == "build":
+        return problems + build_checks(full_weeks, current_ctl)
+
     race_week = sum(d.planned_tss for d in days[-8:-1])  # the seven days before race day
     if race_week > 0.75 * max(weekly_tss):
         problems.append(
@@ -102,8 +115,22 @@ def plan_checks(days: list[PlanDay], current_ctl: float) -> list[str]:
             problems.append(
                 f"longest ride in the build-up is {longest} min, the race {race.planned_duration_min} min"
             )
-    for number, week in enumerate(full_weeks, start=1):
-        hard = sum(d.planned_workout_type in HARD_TYPES for d in week)
-        if hard > 3:
-            problems.append(f"week {number} has {hard} hard days")
+    return problems
+
+
+def build_checks(full_weeks: list[list[PlanDay]], current_ctl: float) -> list[str]:
+    """A fitness block without a race: FTP only rises with regular quality work and growing load."""
+    problems = []
+    weekly = [sum(d.planned_tss for d in w) for w in full_weeks]
+    least = build_peak_tss(current_ctl, len(full_weeks), 0.8)
+    if len(weekly) >= 8 and max(weekly) < least:
+        problems.append(f"peak week {max(weekly)} TSS, fitness only grows from about {least}")
+    if any(d.planned_workout_type == "Race" for w in full_weeks for d in w):
+        problems.append("a fitness plan contains a Race day")
+    build_weeks = [w for w in full_weeks if sum(d.phase == "Build" for d in w) >= 4]
+    thin = [w for w in build_weeks if sum(d.planned_workout_type in HARD_TYPES for d in w) < 2]
+    if build_weeks and len(thin) > len(build_weeks) / 2:
+        problems.append(f"{len(thin)} of {len(build_weeks)} build weeks have fewer than two quality sessions")
+    if not build_weeks:
+        problems.append("no Build weeks")
     return problems

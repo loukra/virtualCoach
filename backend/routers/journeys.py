@@ -1,11 +1,13 @@
 
 import uuid
+from datetime import date, timedelta
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 
 from core import db
 from core.auth import current_athlete
 from core.dates import today
+from logic import ftp, sessions
 from logic.workers import run_ai_plan_generation
 from models import CreateJourneyRequest
 
@@ -31,12 +33,20 @@ def create_journey_endpoint(
     """Creates a journey and generates its plan in the background (status creating -> active)."""
     day = today()
     start_date = payload.start_date or day
-    plan_days = (payload.race_date - start_date).days + 1
+    if payload.goal_type == "build":
+        if not payload.weeks:
+            raise HTTPException(400, "Choose how many weeks the plan should run.")
+        end_date = start_date + timedelta(days=payload.weeks * 7 - 1)
+    elif payload.race_date is None:
+        raise HTTPException(400, "Choose the race date.")
+    else:
+        end_date = payload.race_date
+    plan_days = (end_date - start_date).days + 1
     if plan_days < MIN_PLAN_DAYS:
         raise HTTPException(400, "Race date must be at least 1 week after the start date.")
     if plan_days > MAX_PLAN_DAYS:
         raise HTTPException(400, "Plans can cover at most one year.")
-    if payload.race_date < day:
+    if end_date < day:
         raise HTTPException(400, "Race date is in the past.")
 
     journey_id = str(uuid.uuid4())
@@ -51,9 +61,10 @@ def create_journey_endpoint(
             [athlete_id, day.isoformat(), payload.current_ftp],
         )
         conn.execute(
-            "INSERT INTO journeys (id, athlete_id, name, start_date, race_date) VALUES (?, ?, ?, ?, ?)",
-            [journey_id, athlete_id, payload.journey_name, start_date.isoformat(),
-             payload.race_date.isoformat()],
+            "INSERT INTO journeys (id, athlete_id, name, goal_type, start_date, race_date)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            [journey_id, athlete_id, payload.journey_name, payload.goal_type, start_date.isoformat(),
+             end_date.isoformat()],
         )
     latest = db.query_one(
         "SELECT ctl FROM daily_metrics WHERE athlete_id = ? ORDER BY date DESC LIMIT 1", [athlete_id]
@@ -62,7 +73,7 @@ def create_journey_endpoint(
     background_tasks.add_task(
         run_ai_plan_generation,
         journey_id, athlete_id, payload.journey_name, payload.current_ftp, payload.current_weight,
-        start_date, payload.race_date, day, float(latest["ctl"]) if latest else 0.0,
+        start_date, end_date, day, float(latest["ctl"]) if latest else 0.0, payload.goal_type,
     )
     return {"status": "processing", "message": "AI is building your plan...", "journey_id": journey_id}
 
@@ -70,7 +81,7 @@ def create_journey_endpoint(
 @router.get("/journeys")
 def list_journeys(athlete_id: int = Depends(current_athlete)):
     return db.query(
-        "SELECT id, name, start_date, race_date, status, error, created_at FROM journeys"
+        "SELECT id, name, goal_type, start_date, race_date, status, error, created_at FROM journeys"
         " WHERE athlete_id = ? AND status != 'archived' ORDER BY created_at DESC",
         [athlete_id],
     )
@@ -91,48 +102,79 @@ def archive_journey(journey_id: str, athlete_id: int = Depends(current_athlete))
 
 @router.get("/journeys/{journey_id}/today")
 def journey_today(journey_id: str, athlete_id: int = Depends(current_athlete)):
-    """Everything the journey screen shows for today."""
-    owned_journey(journey_id, athlete_id)
-    day = today().isoformat()
+    """Everything the journey screen shows: today's suggestion, this week, check-in, signals."""
+    journey = owned_journey(journey_id, athlete_id)
+    day = today()
+    if journey["status"] == "active":
+        sessions.match_rides(journey)
+    week, first, last, week_no = sessions.week_sessions(journey, day)
+    ready = sessions.readiness(athlete_id, day)
+    choice = sessions.choose_session(week, day, last, ready)
     prescription = db.query_one(
-        "SELECT workout_text, duration_min, estimated_tss, recovery_reason FROM daily_prescriptions"
-        " WHERE journey_id = ? AND date = ?",
-        [journey_id, day],
+        "SELECT workout_text, duration_min, estimated_tss, recovery_reason, chosen_plan_id"
+        " FROM daily_prescriptions WHERE journey_id = ? AND date = ?",
+        [journey_id, day.isoformat()],
     )
+    ridden = db.query_one(
+        "SELECT COALESCE(SUM(tss), 0) AS tss FROM activities"
+        " WHERE athlete_id = ? AND substr(start_date_local, 1, 10) BETWEEN ? AND ?",
+        [athlete_id, first.isoformat(), last.isoformat()],
+    )
+    start, end = date.fromisoformat(journey["start_date"]), date.fromisoformat(journey["race_date"])
     return {
-        "date": day,
-        "planned": db.query_one(
-            "SELECT planned_workout_type, planned_duration_min, planned_tss, description, phase"
-            " FROM master_plan WHERE journey_id = ? AND date = ?",
-            [journey_id, day],
-        ),
-        "checkin": db.query_one(
-            "SELECT feel_score, soreness_score, notes FROM daily_checkins WHERE athlete_id = ? AND date = ?",
-            [athlete_id, day],
-        ),
+        "date": day.isoformat(),
+        "goal_type": journey["goal_type"],
+        "suggestion": choice,
+        "week": {
+            "number": week_no,
+            "total": (end - start).days // 7 + 1,
+            "first_day": first.isoformat(),
+            "last_day": last.isoformat(),
+            "planned_tss": sum(s["planned_tss"] for s in week),
+            "ridden_tss": ridden["tss"],
+            "sessions": [{**s, "state": session_state(s, day)} for s in week],
+        },
+        "planned": next((s for s in week if s["date"] == day.isoformat()), None),
+        "checkin": ready["checkin"],
+        "signals": ready["signals"],
         "workout": prescription,
-        "fitness": db.query_one(
-            "SELECT date, ctl, atl, tsb FROM daily_metrics WHERE athlete_id = ? AND date <= ?"
-            " ORDER BY date DESC LIMIT 1",
-            [athlete_id, day],
-        ),
+        "fitness": ready["stats"],
+        "ftp": ftp.suggestion(athlete_id, day),
     }
+
+
+def session_state(session: dict, day: date) -> str:
+    """rest, done, open, or missed (still open after its week has ended)."""
+    if session["planned_workout_type"] == "Rest":
+        return "rest"
+    if session["status"] == "done":
+        return "done"
+    return "open" if session["week_end"] >= day.isoformat() else "missed"
 
 
 @router.get("/journeys/{journey_id}/calendar")
 def journey_calendar(journey_id: str, athlete_id: int = Depends(current_athlete)):
     """Planned days and the rides done in the journey's date range."""
     journey = owned_journey(journey_id, athlete_id)
+    if journey["status"] == "active":
+        sessions.match_rides(journey)
     plan = db.query(
         "SELECT p.id, p.date, p.day_number, p.phase, p.planned_workout_type, p.planned_duration_min,"
-        " p.planned_tss, p.description, d.workout_text, d.workout_json"
+        " p.planned_tss, p.description, p.status, p.activity_id, d.workout_text, d.workout_json,"
+        " substr(a.start_date_local, 1, 10) AS done_on"
         " FROM master_plan p LEFT JOIN daily_prescriptions d"
         " ON d.journey_id = p.journey_id AND d.date = p.date"
+        " LEFT JOIN activities a ON a.id = p.activity_id"
         " WHERE p.journey_id = ? ORDER BY p.date",
         [journey_id],
     )
-    for day in plan:
-        day["has_workout_file"] = bool(day.pop("workout_json"))
+    start, end = date.fromisoformat(journey["start_date"]), date.fromisoformat(journey["race_date"])
+    day = today()
+    for row in plan:
+        row["has_workout_file"] = bool(row.pop("workout_json"))
+        week = sessions.week_number(start, date.fromisoformat(row["date"]))
+        row["week_end"] = sessions.week_bounds(start, end, week)[1].isoformat()
+        row["state"] = session_state(row, day)
     activities = db.query(
         "SELECT id, start_date_local, sport_type, name, moving_time, tss, tss_source FROM activities"
         " WHERE athlete_id = ? AND substr(start_date_local, 1, 10) BETWEEN ? AND ?"

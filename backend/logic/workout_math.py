@@ -17,6 +17,9 @@ def step_segments(step: WorkoutStep) -> list[tuple[int, float, float]]:
         return segments
     if step.kind == "steady":
         return [(step.duration_s or 0, step.power or 0, step.power or 0)]
+    if step.kind == "freeride":
+        # An all-out test effort; counted at FTP, which is what it measures.
+        return [(step.duration_s or 0, 1.0, 1.0)]
     return [(step.duration_s or 0, step.power_low or 0, step.power_high or 0)]
 
 
@@ -69,6 +72,9 @@ def to_zwo(workout: Workout) -> str:
             )
         elif step.kind == "steady":
             ET.SubElement(body, "SteadyState", Duration=str(step.duration_s), Power=fmt(step.power))
+        elif step.kind == "freeride":
+            # Zwift lets the rider set the power here: ERG mode is off during this block.
+            ET.SubElement(body, "FreeRide", Duration=str(step.duration_s), FlatRoad="1")
         else:
             ET.SubElement(
                 body,
@@ -99,6 +105,7 @@ def to_markdown(workout: Workout, ftp: int) -> str:
         "intervals": "Intervals",
         "ramp": "Ramp",
         "cooldown": "Cooldown",
+        "freeride": "All out",
     }
     lines = [f"# {workout.name}", "", workout.rationale, ""]
     for step in workout.steps:
@@ -112,6 +119,8 @@ def to_markdown(workout: Workout, ftp: int) -> str:
             )
         elif step.kind == "steady":
             target = f"**{_minutes(step.duration_s)}** @ **{_watts(step.power, ftp)} W**"
+        elif step.kind == "freeride":
+            target = f"**{_minutes(step.duration_s)}** as hard as you can hold evenly (no power target)"
         else:
             target = (
                 f"**{_minutes(step.duration_s)}** from {_watts(step.power_low, ftp)}"

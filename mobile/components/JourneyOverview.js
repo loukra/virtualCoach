@@ -3,12 +3,14 @@ import { View, Text, ActivityIndicator, StyleSheet, TouchableOpacity, ScrollView
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import Markdown from 'react-native-markdown-display';
-import { apiDelete, apiGet, apiPost } from '../lib/api';
-import { localDateString } from '../lib/dates';
-import { colors } from '../theme';
+import { apiDelete, apiGet, apiPost, apiPut } from '../lib/api';
+import { localDateString, weekdayName } from '../lib/dates';
+import { shareWorkout } from '../lib/share';
+import { colors, TYPE_COLORS } from '../theme';
 import CheckInModal from './CheckInModal';
 
 const TIME_OPTIONS = [30, 45, 60, 75, 90, 120, 150, 180];
+const FTP_TEST_MINUTES = 51; // logic.ftp.TEST_DURATION_MIN
 
 // Closest offered duration to the planned one, so the picker starts on the coach's suggestion.
 function snapToOption(minutes) {
@@ -16,13 +18,10 @@ function snapToOption(minutes) {
   return TIME_OPTIONS.reduce((best, t) => (Math.abs(t - minutes) < Math.abs(best - minutes) ? t : best));
 }
 
-// Mirrors forced_recovery_reason in backend/logic/coach.py, so the athlete knows before generating.
-function recoveryHint(checkin, fitness) {
-  if (checkin && (checkin.feel_score <= 2 || checkin.soreness_score <= 2)) {
-    return 'You feel low today, so the coach will prescribe an easy recovery ride.';
-  }
-  if (fitness && fitness.tsb <= -30) return 'Your form is very low, so the coach will prescribe recovery.';
-  return null;
+function minutesFor(session) {
+  if (!session) return 60;
+  if (session.planned_workout_type === 'FTP Test') return 60;
+  return snapToOption(session.planned_duration_min);
 }
 
 function formDescription(tsb) {
@@ -43,9 +42,12 @@ export default function JourneyOverview({ route, navigation }) {
 
   const [journey, setJourney] = useState(null);
   const [today, setToday] = useState(null);
+  const [selectedId, setSelectedId] = useState(null);
   const [minutes, setMinutes] = useState(60);
+  const [choosing, setChoosing] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [loadingWorkout, setLoadingWorkout] = useState(false);
+  const [sharing, setSharing] = useState(false);
   const [showCheckInModal, setShowCheckInModal] = useState(false);
 
   const pollingRef = useRef(null);
@@ -54,7 +56,12 @@ export default function JourneyOverview({ route, navigation }) {
     try {
       const data = await apiGet(`/journeys/${journeyId}/today`);
       setToday(data);
-      setMinutes(snapToOption(data.workout?.duration_min ?? data.planned?.planned_duration_min));
+      // Today's workout decides the selection once it exists; before that, the suggestion.
+      // A workout without a session was written for a day without one, so the suggestion fits it too.
+      const chosenId = data.workout?.chosen_plan_id ?? data.suggestion.session?.id;
+      const chosen = data.week.sessions.find((s) => s.id === chosenId) || null;
+      setSelectedId(chosen ? chosen.id : null);
+      setMinutes(data.workout ? snapToOption(data.workout.duration_min) : minutesFor(chosen));
     } catch (e) {
       console.log('Error loading today:', e.message);
     }
@@ -95,15 +102,43 @@ export default function JourneyOverview({ route, navigation }) {
     setRefreshing(false);
   };
 
+  const selectSession = (session) => {
+    setSelectedId(session.id);
+    setMinutes(minutesFor(session));
+    setChoosing(false);
+  };
+
   const handleGenerateWorkout = async (force) => {
     setLoadingWorkout(true);
     try {
-      await apiPost('/generate-workout', { journey_id: journeyId, available_time: minutes, force });
+      await apiPost('/generate-workout', {
+        journey_id: journeyId, available_time: minutes, plan_id: selectedId, force,
+      });
       await loadToday();
     } catch (e) {
       Alert.alert('Workout not created', e.message);
     } finally {
       setLoadingWorkout(false);
+    }
+  };
+
+  const handleShare = async () => {
+    setSharing(true);
+    try {
+      await shareWorkout(journeyId, today.date);
+    } catch (e) {
+      Alert.alert('Could not share the workout', e.message);
+    } finally {
+      setSharing(false);
+    }
+  };
+
+  const handleFtp = async (value) => {
+    try {
+      await apiPut('/ftp', { ftp: value });
+      await loadToday();
+    } catch (e) {
+      Alert.alert('FTP not saved', e.message);
     }
   };
 
@@ -129,6 +164,7 @@ export default function JourneyOverview({ route, navigation }) {
     return <View style={styles.center}><ActivityIndicator size="large" color={colors.accent} /></View>;
   }
 
+  const isBuild = journey.goal_type === 'build';
   const header = (
     <View style={styles.navHeader}>
       <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backBtn} accessibilityLabel="Back">
@@ -136,7 +172,10 @@ export default function JourneyOverview({ route, navigation }) {
       </TouchableOpacity>
       <View style={{ flex: 1, alignItems: 'center' }}>
         <Text style={styles.navTitle} numberOfLines={1}>{journey.name}</Text>
-        <Text style={styles.navSub}>{countdownText(journey.race_date)}</Text>
+        <Text style={styles.navSub}>
+          {today ? `Week ${today.week.number} of ${today.week.total}` : ''}
+          {today && !isBuild ? ` · ${countdownText(journey.race_date)}` : ''}
+        </Text>
       </View>
       <View style={{ width: 34 }} />
     </View>
@@ -168,10 +207,23 @@ export default function JourneyOverview({ route, navigation }) {
     );
   }
 
-  const { planned, checkin, workout, fitness } = today || {};
+  if (!today) {
+    return (
+      <SafeAreaView style={styles.screen} edges={['top']}>
+        {header}
+        <View style={styles.center}><ActivityIndicator color={colors.accent} /></View>
+      </SafeAreaView>
+    );
+  }
+
+  const { suggestion, week, checkin, workout, fitness, signals, ftp } = today;
+  const sessions = week.sessions.filter((s) => s.state !== 'rest');
+  const openSessions = sessions.filter((s) => s.state === 'open');
+  const selected = sessions.find((s) => s.id === selectedId) || null;
+  const workoutMatches = workout && workout.chosen_plan_id === selectedId;
   const form = fitness ? formDescription(fitness.tsb) : null;
-  const hint = recoveryHint(checkin, fitness);
-  const isRestDay = planned && (planned.planned_workout_type === 'Rest' || !planned.planned_duration_min);
+  const isTest = selected?.planned_workout_type === 'FTP Test';
+  const staleRecovery = workout && suggestion.mode === 'recovery' && !workout.recovery_reason;
 
   return (
     <SafeAreaView style={styles.screen} edges={['top']}>
@@ -187,46 +239,70 @@ export default function JourneyOverview({ route, navigation }) {
       >
         {header}
 
-        {/* FITNESS */}
-        <Text style={styles.sectionLabel}>TRAINING LOAD</Text>
-        {fitness ? (
-          <View style={styles.row}>
-            <Metric label="FITNESS" sub="CTL" value={Math.round(fitness.ctl)} />
-            <Metric label="FATIGUE" sub="ATL" value={Math.round(fitness.atl)} />
-            <Metric label="FORM" sub={form.label} value={Math.round(fitness.tsb)} color={form.color} />
+        {signals.map((s) => (
+          <View key={s.kind} style={[styles.banner, { marginTop: 10 }]}>
+            <Ionicons name="warning-outline" size={16} color={colors.warn} />
+            <Text style={styles.bannerText}>{s.message}</Text>
           </View>
-        ) : (
-          <Text style={styles.hint}>No rides synced yet. Fitness appears after your first Strava sync.</Text>
-        )}
+        ))}
 
-        {/* TODAY'S PLAN */}
-        <Text style={styles.sectionLabel}>TODAY IN THE PLAN</Text>
+        {ftp && <FtpCard ftp={ftp} onAccept={() => handleFtp(ftp.suggested)} onKeep={() => handleFtp(ftp.current)} />}
+
+        {/* TODAY */}
+        <Text style={styles.sectionLabel}>TODAY</Text>
         <View style={styles.card}>
-          {planned ? (
+          {selected ? (
             <>
               <View style={styles.planRow}>
-                <Text style={styles.planType}>{planned.planned_workout_type}</Text>
-                {planned.phase ? <Text style={styles.phase}>{planned.phase}</Text> : null}
+                <View style={styles.typeRow}>
+                  <View style={[styles.dot, { backgroundColor: TYPE_COLORS[selected.planned_workout_type] }]} />
+                  <Text style={styles.planType}>{selected.planned_workout_type}</Text>
+                </View>
+                {selected.phase ? <Text style={styles.phase}>{selected.phase}</Text> : null}
               </View>
-              {!isRestDay && (
-                <Text style={styles.planMeta}>
-                  {planned.planned_duration_min} min · {planned.planned_tss} TSS
-                </Text>
-              )}
-              {planned.description ? <Text style={styles.planDesc}>{planned.description}</Text> : null}
+              <Text style={styles.planMeta}>
+                {isTest ? `${FTP_TEST_MINUTES} min · 20 min all out` : `${selected.planned_duration_min} min · ${selected.planned_tss} TSS`}
+              </Text>
+              {selected.description ? <Text style={styles.planDesc}>{selected.description}</Text> : null}
+              {selected.id === suggestion.session?.id && suggestion.reason !== 'Planned for today.' ? (
+                <Text style={styles.reason}>{suggestion.reason}</Text>
+              ) : null}
+              {selected.id !== suggestion.session?.id ? (
+                <Text style={styles.reason}>You chose this one; planned for {weekdayName(selected.date)}.</Text>
+              ) : null}
             </>
           ) : (
-            <Text style={styles.hint}>Nothing planned for today.</Text>
+            <>
+              <Text style={styles.planType}>
+                {suggestion.mode === 'recovery' ? 'Easy recovery spin' : suggestion.mode === 'done' ? 'Done for today' : 'Rest day'}
+              </Text>
+              <Text style={styles.planDesc}>{suggestion.reason}</Text>
+            </>
           )}
+          {openSessions.length > 0 && (
+            <TouchableOpacity style={styles.linkRow} onPress={() => setChoosing(!choosing)}>
+              <Text style={styles.linkText}>{choosing ? 'Close' : selected ? 'Ride another session' : 'Ride a session anyway'}</Text>
+              <Ionicons name={choosing ? 'chevron-up' : 'chevron-down'} size={16} color={colors.accent} />
+            </TouchableOpacity>
+          )}
+          {choosing && openSessions.map((s) => (
+            <TouchableOpacity key={s.id} style={styles.choice} onPress={() => selectSession(s)}>
+              <View style={[styles.dot, { backgroundColor: TYPE_COLORS[s.planned_workout_type] }]} />
+              <Text style={styles.choiceText}>{s.planned_workout_type}</Text>
+              <Text style={styles.choiceMeta}>{weekdayName(s.date, 'short')} · {s.planned_duration_min} min</Text>
+              {s.id === selectedId && <Ionicons name="checkmark" size={16} color={colors.accent} />}
+            </TouchableOpacity>
+          ))}
         </View>
 
         {/* CHECK-IN */}
-        <Text style={styles.sectionLabel}>HOW DO YOU FEEL?</Text>
+        <Text style={styles.sectionLabel}>HOW YOU FEEL</Text>
         {checkin ? (
-          <View style={styles.row}>
-            <CheckInTile label="MOOD" value={checkin.feel_score} onPress={() => setShowCheckInModal(true)} />
-            <CheckInTile label="LEGS" value={checkin.soreness_score} onPress={() => setShowCheckInModal(true)} />
-          </View>
+          <TouchableOpacity style={styles.row} onPress={() => setShowCheckInModal(true)} accessibilityLabel="Update check-in">
+            <CheckInTile label="ENERGY" value={checkin.feel_score} />
+            <CheckInTile label="LEGS" value={checkin.soreness_score} />
+            <CheckInTile label="MOTIVATION" value={checkin.motivation_score} />
+          </TouchableOpacity>
         ) : (
           <TouchableOpacity style={[styles.card, styles.checkInPrompt]} onPress={() => setShowCheckInModal(true)}>
             <Ionicons name="happy-outline" size={22} color={colors.accent} />
@@ -234,16 +310,10 @@ export default function JourneyOverview({ route, navigation }) {
             <Ionicons name="chevron-forward" size={18} color={colors.textFaint} />
           </TouchableOpacity>
         )}
-
-        {hint && (
-          <View style={[styles.recovery, { marginTop: 12, marginBottom: 0 }]}>
-            <Ionicons name="information-circle-outline" size={16} color={colors.warn} />
-            <Text style={styles.recoveryText}>{hint}</Text>
-          </View>
-        )}
+        {checkin && <Text style={styles.tapHint}>Tap to update whenever it changes.</Text>}
 
         {/* WORKOUT */}
-        <Text style={styles.sectionLabel}>YOUR WORKOUT</Text>
+        <Text style={styles.sectionLabel}>WORKOUT</Text>
         <View style={styles.card}>
           <Text style={styles.timeLabel}>Time available</Text>
           <View style={styles.chips}>
@@ -251,34 +321,41 @@ export default function JourneyOverview({ route, navigation }) {
               <TouchableOpacity
                 key={t}
                 onPress={() => setMinutes(t)}
-                style={[styles.chip, minutes === t && styles.chipActive]}
-                disabled={loadingWorkout}
+                style={[styles.chip, minutes === t && styles.chipActive, isTest && t < FTP_TEST_MINUTES && styles.chipDisabled]}
+                disabled={loadingWorkout || (isTest && t < FTP_TEST_MINUTES)}
               >
                 <Text style={[styles.chipText, minutes === t && styles.chipTextActive]}>{t} min</Text>
               </TouchableOpacity>
             ))}
           </View>
 
-          {!today || loadingWorkout ? (
+          {loadingWorkout ? (
             <View style={styles.loading}>
               <ActivityIndicator color={colors.accent} />
-              <Text style={styles.hint}>{loadingWorkout ? 'Your coach is writing the workout…' : 'Loading…'}</Text>
+              <Text style={styles.hint}>{isTest ? 'Preparing your FTP test…' : 'Your coach is writing the workout…'}</Text>
             </View>
-          ) : workout ? (
+          ) : workoutMatches ? (
             <View style={{ marginTop: 15 }}>
-              {hint && !workout.recovery_reason ? (
-                <TouchableOpacity style={styles.recovery} onPress={() => handleGenerateWorkout(true)}>
+              {staleRecovery ? (
+                <TouchableOpacity style={styles.banner} onPress={() => handleGenerateWorkout(true)}>
                   <Ionicons name="refresh" size={16} color={colors.warn} />
-                  <Text style={styles.recoveryText}>This workout was made before your check-in. Tap to update it.</Text>
+                  <Text style={styles.bannerText}>This workout was made before your check-in. Tap to update it.</Text>
                 </TouchableOpacity>
               ) : null}
               {workout.recovery_reason ? (
-                <View style={styles.recovery}>
+                <View style={styles.banner}>
                   <Ionicons name="bed-outline" size={16} color={colors.warn} />
-                  <Text style={styles.recoveryText}>Recovery day: {workout.recovery_reason}</Text>
+                  <Text style={styles.bannerText}>Recovery: {workout.recovery_reason}</Text>
                 </View>
               ) : null}
               <Markdown style={markdownStyles}>{workout.workout_text}</Markdown>
+              <TouchableOpacity style={styles.shareBtn} onPress={handleShare} disabled={sharing}>
+                {sharing ? <ActivityIndicator color={colors.text} /> : <Ionicons name="share-outline" size={18} color={colors.text} />}
+                <Text style={styles.generateText}>Send to Zwift (.zwo)</Text>
+              </TouchableOpacity>
+              <Text style={styles.shareHint}>
+                AirDrop it to your Mac, then move it into Documents › Zwift › Workouts › (your Zwift ID). It shows up under Custom Workouts.
+              </Text>
               <TouchableOpacity
                 style={styles.secondaryBtn}
                 onPress={() => handleGenerateWorkout(workout.duration_min === minutes)}
@@ -292,12 +369,57 @@ export default function JourneyOverview({ route, navigation }) {
           ) : (
             <View style={{ marginTop: 15, alignItems: 'center' }}>
               <TouchableOpacity style={styles.generateBtn} onPress={() => handleGenerateWorkout(false)}>
-                <Text style={styles.generateText}>Create today's workout</Text>
+                <Text style={styles.generateText}>
+                  {isTest ? 'Get the FTP test' : selected ? `Create ${selected.planned_workout_type} workout` : 'Create an easy ride'}
+                </Text>
               </TouchableOpacity>
+              {workout && <Text style={[styles.hint, { marginTop: 10 }]}>This replaces today's earlier workout.</Text>}
               {!checkin && <Text style={[styles.hint, { marginTop: 10 }]}>Tip: check in first so the coach knows how you feel.</Text>}
             </View>
           )}
         </View>
+
+        {/* THIS WEEK */}
+        <Text style={styles.sectionLabel}>THIS WEEK</Text>
+        <View style={styles.card}>
+          <View style={styles.progressRow}>
+            <Text style={styles.hint}>{week.ridden_tss} of {week.planned_tss} TSS</Text>
+            <Text style={styles.hint}>{sessions.filter((s) => s.state === 'done').length}/{sessions.length} sessions</Text>
+          </View>
+          <View style={styles.progressTrack}>
+            <View style={[styles.progressFill, { width: `${Math.min(100, (100 * week.ridden_tss) / Math.max(1, week.planned_tss))}%` }]} />
+          </View>
+          {sessions.map((s) => (
+            <TouchableOpacity
+              key={s.id}
+              style={styles.weekRow}
+              disabled={s.state !== 'open'}
+              onPress={() => selectSession(s)}
+              accessibilityLabel={`${s.planned_workout_type} ${s.state}`}
+            >
+              <Text style={styles.weekDay}>{weekdayName(s.date, 'short')}</Text>
+              <View style={[styles.dot, { backgroundColor: TYPE_COLORS[s.planned_workout_type] }]} />
+              <Text style={[styles.weekType, s.state === 'done' && styles.doneText]}>{s.planned_workout_type}</Text>
+              <Text style={styles.weekMeta}>{s.planned_duration_min} min</Text>
+              <SessionMark session={s} selected={s.id === selectedId} />
+            </TouchableOpacity>
+          ))}
+          <Text style={[styles.hint, { marginTop: 10, fontSize: 12 }]}>
+            Sessions can move within the week: whatever you ride counts for the session that fits it.
+          </Text>
+        </View>
+
+        {/* FITNESS */}
+        <Text style={styles.sectionLabel}>TRAINING LOAD</Text>
+        {fitness ? (
+          <View style={styles.row}>
+            <Metric label="FITNESS" sub="CTL" value={Math.round(fitness.ctl)} />
+            <Metric label="FATIGUE" sub="ATL" value={Math.round(fitness.atl)} />
+            <Metric label="FORM" sub={form.label} value={Math.round(fitness.tsb)} color={form.color} />
+          </View>
+        ) : (
+          <Text style={styles.hint}>No rides synced yet. Fitness appears after your first Strava sync.</Text>
+        )}
       </ScrollView>
     </SafeAreaView>
   );
@@ -306,9 +428,42 @@ export default function JourneyOverview({ route, navigation }) {
 function countdownText(raceDate) {
   const days = daysUntil(raceDate);
   if (days > 1) return `${days} days to go`;
-  if (days === 1) return 'Race is tomorrow';
-  if (days === 0) return 'Race day';
-  return 'Race done';
+  if (days === 1) return 'race tomorrow';
+  if (days === 0) return 'race day';
+  return 'race done';
+}
+
+function FtpCard({ ftp, onAccept, onKeep }) {
+  const up = ftp.suggested > ftp.current;
+  const source = ftp.source === 'test'
+    ? `Your FTP test on ${weekdayName(ftp.date)}`
+    : `Your best 20 minutes on ${weekdayName(ftp.date)}`;
+  return (
+    <View style={[styles.card, styles.ftpCard]}>
+      <View style={styles.typeRow}>
+        <Ionicons name={up ? 'trending-up' : 'trending-down'} size={20} color={up ? colors.good : colors.warn} />
+        <Text style={styles.ftpTitle}>New FTP: {ftp.suggested} W ({up ? '+' : ''}{ftp.change_pct} %)</Text>
+      </View>
+      <Text style={styles.planDesc}>{source} points to {ftp.suggested} W instead of {ftp.current} W. Workouts use FTP for every target.</Text>
+      <View style={styles.ftpButtons}>
+        <TouchableOpacity style={styles.generateBtn} onPress={onAccept}>
+          <Text style={styles.generateText}>Use {ftp.suggested} W</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={styles.keepBtn} onPress={onKeep}>
+          <Text style={styles.secondaryText}>Keep {ftp.current} W</Text>
+        </TouchableOpacity>
+      </View>
+    </View>
+  );
+}
+
+function SessionMark({ session, selected }) {
+  if (session.state === 'done') {
+    const moved = session.done_on && session.done_on !== session.date;
+    return <Text style={styles.markDone}>✓{moved ? ` ${weekdayName(session.done_on, 'short')}` : ''}</Text>;
+  }
+  if (session.state === 'missed') return <Text style={styles.markMissed}>missed</Text>;
+  return selected ? <Ionicons name="radio-button-on" size={16} color={colors.accent} /> : <Ionicons name="radio-button-off" size={16} color={colors.textFaint} />;
 }
 
 function Metric({ label, sub, value, color = colors.text }) {
@@ -321,14 +476,13 @@ function Metric({ label, sub, value, color = colors.text }) {
   );
 }
 
-function CheckInTile({ label, value, onPress }) {
-  const color = value >= 4 ? colors.good : value <= 2 ? colors.accent : colors.text;
+function CheckInTile({ label, value }) {
+  const color = !value ? colors.textFaint : value >= 4 ? colors.good : value <= 2 ? colors.accent : colors.text;
   return (
-    <TouchableOpacity style={styles.tile} onPress={onPress}>
+    <View style={styles.tile}>
       <Text style={styles.tileLabel}>{label}</Text>
-      <Text style={[styles.tileValue, { color }]}>{value}/5</Text>
-      <Text style={styles.tileSub}>tap to change</Text>
-    </TouchableOpacity>
+      <Text style={[styles.tileValue, { color }]}>{value ? `${value}/5` : '–'}</Text>
+    </View>
   );
 }
 
@@ -336,40 +490,66 @@ const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: colors.background },
   content: { padding: 20, paddingBottom: 50 },
   center: { flex: 1, backgroundColor: colors.background, justifyContent: 'center', alignItems: 'center', padding: 30 },
-  navHeader: { flexDirection: 'row', alignItems: 'center', marginBottom: 10 },
+  navHeader: { flexDirection: 'row', alignItems: 'center', marginBottom: 6 },
   backBtn: { padding: 5 },
   navTitle: { color: colors.text, fontSize: 18, fontWeight: 'bold' },
   navSub: { color: colors.textMuted, fontSize: 12, marginTop: 2 },
   stateText: { color: colors.text, fontSize: 16, marginTop: 15, textAlign: 'center' },
   stateSub: { color: colors.textMuted, marginTop: 8, textAlign: 'center' },
-  sectionLabel: { color: colors.textFaint, fontSize: 12, fontWeight: 'bold', marginBottom: 10, marginTop: 20, letterSpacing: 1 },
+  sectionLabel: { color: colors.textFaint, fontSize: 12, fontWeight: 'bold', marginBottom: 10, marginTop: 22, letterSpacing: 1 },
   hint: { color: colors.textMuted, fontSize: 14, lineHeight: 20 },
   row: { flexDirection: 'row', gap: 12 },
   tile: { flex: 1, backgroundColor: colors.card, padding: 14, borderRadius: 10, alignItems: 'center' },
   tileLabel: { color: colors.textMuted, fontSize: 10, fontWeight: 'bold', marginBottom: 4 },
-  tileValue: { fontSize: 24, fontWeight: 'bold' },
+  tileValue: { fontSize: 22, fontWeight: 'bold' },
   tileSub: { color: colors.textFaint, fontSize: 10, marginTop: 2 },
+  tapHint: { color: colors.textFaint, fontSize: 11, marginTop: 6, textAlign: 'center' },
   card: { backgroundColor: colors.card, padding: 18, borderRadius: 12 },
   planRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  typeRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  dot: { width: 10, height: 10, borderRadius: 5 },
   planType: { color: colors.text, fontSize: 20, fontWeight: 'bold' },
   phase: { color: colors.accent, fontSize: 11, fontWeight: 'bold', textTransform: 'uppercase' },
   planMeta: { color: colors.textMuted, marginTop: 4 },
   planDesc: { color: '#ddd', marginTop: 10, lineHeight: 21 },
+  reason: { color: colors.warn, marginTop: 10, fontSize: 13, lineHeight: 19 },
+  linkRow: { flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 14, paddingTop: 12, borderTopWidth: 1, borderTopColor: colors.border },
+  linkText: { color: colors.accent, fontWeight: '600' },
+  choice: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 10 },
+  choiceText: { color: colors.text, fontSize: 15, flex: 1 },
+  choiceMeta: { color: colors.textMuted, fontSize: 13 },
   checkInPrompt: { flexDirection: 'row', alignItems: 'center', gap: 12 },
   checkInPromptText: { color: colors.text, fontSize: 16, flex: 1 },
   timeLabel: { color: colors.textMuted, fontSize: 12, marginBottom: 8 },
   chips: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   chip: { paddingVertical: 8, paddingHorizontal: 12, borderRadius: 16, backgroundColor: colors.input },
   chipActive: { backgroundColor: colors.accent },
+  chipDisabled: { opacity: 0.3 },
   chipText: { color: colors.textMuted, fontWeight: '600' },
   chipTextActive: { color: colors.text },
   loading: { padding: 20, alignItems: 'center', gap: 10 },
-  recovery: { flexDirection: 'row', gap: 8, alignItems: 'center', backgroundColor: '#2a2210', padding: 10, borderRadius: 8, marginBottom: 10 },
-  recoveryText: { color: colors.warn, flex: 1 },
-  generateBtn: { backgroundColor: colors.accent, paddingVertical: 12, paddingHorizontal: 25, borderRadius: 30 },
+  banner: { flexDirection: 'row', gap: 8, alignItems: 'center', backgroundColor: '#2a2210', padding: 10, borderRadius: 8, marginBottom: 10 },
+  bannerText: { color: colors.warn, flex: 1, lineHeight: 19 },
+  generateBtn: { backgroundColor: colors.accent, paddingVertical: 12, paddingHorizontal: 25, borderRadius: 30, alignItems: 'center' },
   generateText: { color: colors.text, fontWeight: 'bold' },
+  shareBtn: { flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 8, backgroundColor: colors.accent, paddingVertical: 12, borderRadius: 30, marginTop: 15 },
+  shareHint: { color: colors.textFaint, fontSize: 12, lineHeight: 17, marginTop: 8, textAlign: 'center' },
   secondaryBtn: { flexDirection: 'row', justifyContent: 'center', gap: 6, marginTop: 15, paddingTop: 12, borderTopWidth: 1, borderTopColor: colors.border },
   secondaryText: { color: colors.textMuted, fontSize: 13 },
+  progressRow: { flexDirection: 'row', justifyContent: 'space-between' },
+  progressTrack: { height: 6, borderRadius: 3, backgroundColor: colors.input, marginTop: 8, marginBottom: 6, overflow: 'hidden' },
+  progressFill: { height: 6, backgroundColor: colors.good },
+  weekRow: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 10, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border },
+  weekDay: { color: colors.textMuted, width: 34, fontSize: 13 },
+  weekType: { color: colors.text, flex: 1, fontSize: 15 },
+  doneText: { color: colors.textMuted },
+  weekMeta: { color: colors.textMuted, fontSize: 13 },
+  markDone: { color: colors.good, fontWeight: 'bold', minWidth: 16, textAlign: 'right' },
+  markMissed: { color: colors.textFaint, fontSize: 12 },
+  ftpCard: { marginTop: 14, borderWidth: 1, borderColor: '#2f4a2f' },
+  ftpTitle: { color: colors.text, fontSize: 17, fontWeight: 'bold' },
+  ftpButtons: { flexDirection: 'row', alignItems: 'center', gap: 10, marginTop: 14 },
+  keepBtn: { paddingVertical: 12, paddingHorizontal: 15 },
 });
 
 const markdownStyles = {

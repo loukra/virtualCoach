@@ -5,34 +5,16 @@ import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect } from '@react-navigation/native';
 import Markdown from 'react-native-markdown-display';
 import { apiGet } from '../lib/api';
-import { localDateString } from '../lib/dates';
+import { localDateString, parseLocalDate, weekdayName } from '../lib/dates';
 import { useJourney } from '../context/JourneyContext';
-import { colors } from '../theme';
+import { colors, TYPE_COLORS } from '../theme';
 
 const GRID_PADDING = 16;
 // Whole pixels, so seven tiles always fit in one row.
 const TILE_SIZE = Math.floor((Dimensions.get('window').width - GRID_PADDING * 2) / 7);
 const DAY_LABELS = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
 
-// One colour per intensity, easy to hard (types from backend/logic/schemas.py).
-const TYPE_COLORS = {
-  Rest: '#333',
-  Recovery: '#a0a0a8',
-  Endurance: '#5dade2',
-  Tempo: '#58d68d',
-  'Sweet Spot': '#f4d03f',
-  Threshold: '#f5b041',
-  'VO2 Max': '#ec7063',
-  Anaerobic: '#c0392b',
-  Race: '#af7ac5',
-};
-const LEGEND = ['Recovery', 'Endurance', 'Tempo', 'Sweet Spot', 'Threshold', 'VO2 Max'];
-
-// "2026-11-01" as a local date (new Date("2026-11-01") would be midnight UTC).
-function parseLocalDate(iso) {
-  const [y, m, d] = iso.split('-').map(Number);
-  return new Date(y, m - 1, d);
-}
+const LEGEND = ['Recovery', 'Endurance', 'Tempo', 'Sweet Spot', 'Threshold', 'VO2 Max', 'FTP Test'];
 
 function formatTime(seconds) {
   if (!seconds) return '0m';
@@ -115,21 +97,23 @@ export default function TrainingPlanView() {
     if (day.empty) return <View key={day.key} style={styles.tileEmpty} />;
 
     const type = day.plan.planned_workout_type;
-    const done = day.rides.length > 0;
+    const state = day.plan.state; // rest | done | open | missed (see backend session_state)
+    const done = state === 'done';
     const isToday = day.date === today;
     return (
       <TouchableOpacity
         key={day.key}
         style={[styles.tile, type === 'Rest' && styles.restTile, done && styles.doneTile, isToday && styles.todayTile]}
         onPress={() => setSelectedDay(day)}
-        accessibilityLabel={`${day.date}: ${type}${done ? ', ride done' : ''}`}
+        accessibilityLabel={`${day.date}: ${type}, ${state}`}
       >
         <Text style={[styles.miniDate, isToday && { color: colors.accent }]}>{Number(day.date.slice(8))}</Text>
         {done ? (
           <Ionicons name="checkmark" size={16} color="#A7F3D0" />
         ) : type !== 'Rest' ? (
-          <View style={[styles.dot, { backgroundColor: TYPE_COLORS[type] || colors.accent }]} />
+          <View style={[styles.dot, { backgroundColor: TYPE_COLORS[type] || colors.accent }, state === 'missed' && styles.missedDot]} />
         ) : null}
+        {day.rides.length > 0 && !done && <View style={styles.rideMark} />}
       </TouchableOpacity>
     );
   };
@@ -215,6 +199,7 @@ export default function TrainingPlanView() {
                   <Text style={styles.detailSub}>{planned.planned_duration_min} min · {planned.planned_tss} TSS</Text>
                 )}
                 {planned.description ? <Text style={styles.detailBody}>{planned.description}</Text> : null}
+                <SessionState plan={planned} />
 
                 {planned.workout_text ? (
                   <View style={styles.divider}>
@@ -225,7 +210,7 @@ export default function TrainingPlanView() {
 
                 {selectedDay.rides.map((ride) => (
                   <View key={ride.id} style={styles.divider}>
-                    <Text style={[styles.sectionHeader, { color: '#A7F3D0' }]}>DONE</Text>
+                    <Text style={[styles.sectionHeader, { color: '#A7F3D0' }]}>RIDDEN</Text>
                     <Text style={styles.detailTitle}>{ride.name}</Text>
                     <View style={styles.statsGrid}>
                       <View style={styles.statBox}><Text style={styles.statLabel}>TIME</Text><Text style={styles.statValue}>{formatTime(ride.moving_time)}</Text></View>
@@ -240,6 +225,19 @@ export default function TrainingPlanView() {
       </Modal>
     </SafeAreaView>
   );
+}
+
+function SessionState({ plan }) {
+  if (plan.state === 'done') {
+    const moved = plan.done_on && plan.done_on !== plan.date;
+    return (
+      <Text style={[styles.stateNote, { color: '#A7F3D0' }]}>
+        ✓ Done{moved ? ` on ${weekdayName(plan.done_on)}` : ''}
+      </Text>
+    );
+  }
+  if (plan.state === 'missed') return <Text style={styles.stateNote}>Not ridden that week.</Text>;
+  return null;
 }
 
 const styles = StyleSheet.create({
@@ -269,6 +267,9 @@ const styles = StyleSheet.create({
   todayTile: { borderWidth: 2, borderColor: colors.accent },
   miniDate: { fontSize: 10, fontWeight: 'bold', color: '#666', position: 'absolute', top: 4, right: 5 },
   dot: { width: 8, height: 8, borderRadius: 4 },
+  missedDot: { opacity: 0.3 },
+  rideMark: { position: 'absolute', bottom: 4, width: 4, height: 4, borderRadius: 2, backgroundColor: '#A7F3D0' },
+  stateNote: { color: colors.textMuted, fontSize: 13, marginTop: 10 },
 
   modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.8)', justifyContent: 'center', alignItems: 'center' },
   modalContent: { width: '80%', backgroundColor: '#222', borderRadius: 12, padding: 20 },

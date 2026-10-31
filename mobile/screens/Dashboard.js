@@ -120,7 +120,9 @@ export default function Dashboard() {
                       >
                           <View>
                               <Text style={styles.cardTitle}>{item.name}</Text>
-                              <Text style={styles.cardDate}>Race: {item.race_date}</Text>
+                              <Text style={styles.cardDate}>
+                                {item.goal_type === 'build' ? `Build fitness · until ${item.race_date}` : `Race: ${item.race_date}`}
+                              </Text>
                               {item.status === 'creating' && <Text style={styles.cardStatus}>Building plan…</Text>}
                               {item.status === 'failed' && <Text style={[styles.cardStatus, {color:'#ff4d4d'}]}>Plan failed</Text>}
                           </View>

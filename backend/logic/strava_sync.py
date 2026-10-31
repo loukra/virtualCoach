@@ -8,6 +8,7 @@ import numpy as np
 from stravalib.client import Client
 
 from core import db
+from logic.ftp import best_power
 from logic.strava_auth import get_valid_token
 
 log = logging.getLogger(__name__)
@@ -99,6 +100,7 @@ def build_ride(act, streams, athlete_id, ftp, max_hr) -> dict:
     watts = clean_power_spikes(_stream(streams, "watts"))
     avg_watts = float(np.mean(watts)) if len(watts) else 0.0
     np_val = calculate_normalized_power(watts) if len(watts) else 0
+    times = _stream(streams, "time")
 
     hr = _stream(streams, "heartrate")
     hr = hr[hr > 0]
@@ -127,6 +129,7 @@ def build_ride(act, streams, athlete_id, ftp, max_hr) -> dict:
         "efficiency_factor": calculate_efficiency_factor(np_val, avg_hr),
         "elevation_gain": int(float(act.total_elevation_gain or 0)),
         "kilojoules": act.kilojoules or 0,
+        "best_20min_watts": best_power(watts, times) if len(watts) else None,
     }
 
 
@@ -190,7 +193,7 @@ def _backfill(athlete_id: int, days_back: int) -> int:
         ftp = get_ftp_for_date(act.start_date.isoformat(), history, current_ftp)
         try:
             streams = client.get_activity_streams(
-                act.id, types=["watts", "heartrate"], resolution="high"
+                act.id, types=["time", "watts", "heartrate"], resolution="high"
             )
         except Exception:
             log.warning("No streams for activity %s, using summary data only", act.id)

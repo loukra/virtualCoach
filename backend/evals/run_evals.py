@@ -2,7 +2,7 @@
 
     cd backend && python -m evals.run_evals                     # six workout scenarios, once each
     cd backend && python -m evals.run_evals --runs 3            # each scenario three times
-    cd backend && python -m evals.run_evals --plan --judge      # plus a 10-week plan and a judge model
+    cd backend && python -m evals.run_evals --plan --judge      # plus two plans and a judge model
 
 Needs OPENAI_API_KEY only. A workout passes when it satisfies the guardrails, the scenario's
 expectations and the coaching checks in evals/checks.py (does it fit the planned session?);
@@ -29,6 +29,7 @@ import logic.ai as ai  # noqa: E402
 from core.config import get_settings  # noqa: E402
 from evals.checks import plan_checks, workout_checks  # noqa: E402
 from evals.judge import judge_workout, verdict_problems  # noqa: E402
+from logic import ftp  # noqa: E402
 from logic.ai import GenerationError, generate_structured, load_prompt  # noqa: E402
 from logic.ai_planner import build_plan  # noqa: E402
 from logic.coach import forced_recovery_reason, workout_input  # noqa: E402
@@ -102,23 +103,33 @@ def run_workout_scenario(s: dict, judge_model: str | None = None) -> dict:
     }
 
 
-def run_plan_scenario() -> dict:
+PLAN_SCENARIOS = {
+    "plan_race_10_weeks": {"goal": "Gran Fondo, 160 km with 1800 m climbing", "goal_type": "race",
+                           "weeks": 10},
+    "plan_build_12_weeks": {"goal": "Get fitter over the winter on Zwift", "goal_type": "build",
+                            "weeks": 12},
+}
+
+
+def run_plan_scenario(name: str) -> dict:
+    s = PLAN_SCENARIOS[name]
     start_date = date.today()
+    total_days = s["weeks"] * 7
     start = len(attempt_log)
     started = time.monotonic()
     try:
         days = build_plan(
-            athlete_id=None, journey_id=None, goal="Gran Fondo, 160 km with 1800 m climbing",
-            start_date=start_date, race_date=start_date + timedelta(days=69),
-            current_date=start_date, ftp=250, weight=75, current_ctl=PLAN_CTL, longest_ride_min=180,
+            athlete_id=None, journey_id=None, goal=s["goal"], start_date=start_date,
+            race_date=start_date + timedelta(days=total_days - 1), current_date=start_date, ftp_watts=250,
+            weight=75, current_ctl=PLAN_CTL, longest_ride_min=180, goal_type=s["goal_type"],
         )
-        problems = [] if len(days) == 70 else [f"{len(days)} days instead of 70"]
-        problems += plan_checks(days, PLAN_CTL)
+        problems = [] if len(days) == total_days else [f"{len(days)} days instead of {total_days}"]
+        problems += plan_checks(days, PLAN_CTL, s["goal_type"], ftp.test_days(total_days, s["goal_type"]))
     except GenerationError as e:
         days, problems = [], e.errors
     attempts = attempt_log[start:]
     return {
-        "name": "plan_10_weeks",
+        "name": name,
         "passed": bool(days) and not problems,
         "first_try": bool(attempts) and all(a["ok"] for a in attempts),
         "attempts": len(attempts),
@@ -194,7 +205,8 @@ def print_report(report: dict, before: dict | None) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--runs", type=int, default=1, help="repeat every scenario this often")
-    parser.add_argument("--plan", action="store_true", help="also generate a 10-week plan (once)")
+    parser.add_argument("--plan", action="store_true",
+                        help="also generate a 10-week race plan and a 12-week fitness plan (once each)")
     parser.add_argument("--judge", action="store_true", help="let a second model grade each workout")
     parser.add_argument("--min-pass", type=float, default=1.0,
                         help="share of runs that must pass for exit code 0 (default: all)")
@@ -207,7 +219,7 @@ def main() -> int:
 
     results = [run_workout_scenario(s, judge_model) for _ in range(args.runs) for s in scenarios]
     if args.plan:
-        results.append(run_plan_scenario())
+        results += [run_plan_scenario(name) for name in PLAN_SCENARIOS]
 
     prompt_names = ["workout"] + (["plan_macro", "plan_block"] if args.plan else []) + (
         ["eval_judge"] if args.judge else [])

@@ -8,3 +8,13 @@ export function localDateString(date = new Date()) {
   const d = String(date.getDate()).padStart(2, '0');
   return `${y}-${m}-${d}`;
 }
+
+// "2026-11-01" as a local date (new Date("2026-11-01") would be midnight UTC).
+export function parseLocalDate(iso) {
+  const [y, m, d] = iso.split('-').map(Number);
+  return new Date(y, m - 1, d);
+}
+
+export function weekdayName(iso, style = 'long') {
+  return parseLocalDate(iso).toLocaleDateString('en-GB', { weekday: style });
+}

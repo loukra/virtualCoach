@@ -109,10 +109,10 @@ def test_workout_is_generated_once_per_day_and_exported(client, athletes, no_bac
     db.execute("UPDATE journeys SET status = 'active' WHERE id = ?", [journey_id])
     calls = []
 
-    def fake_generate(athlete_id, journey, available_time):
+    def fake_generate(athlete_id, journey, available_time, session):
         calls.append((athlete_id, journey["id"], available_time))
         return {"date": today(), "workout": sweet_spot_workout(), "markdown": "# Sweet Spot 3x10",
-                "estimated_tss": 57, "recovery_reason": None}
+                "estimated_tss": 57, "recovery_reason": None, "plan_id": None}
 
     monkeypatch.setattr(routers.workout, "generate_workout", fake_generate)
     body = {"journey_id": journey_id, "available_time": 60}
@@ -128,6 +128,7 @@ def test_workout_is_generated_once_per_day_and_exported(client, athletes, no_bac
 
     zwo = client.get(f"/workouts/{journey_id}/{today().isoformat()}.zwo", headers=athletes["louis"])
     assert zwo.status_code == 200 and "<IntervalsT" in zwo.text
+    assert f'"{today().isoformat()} Sweet Spot 3x10.zwo"' in zwo.headers["content-disposition"]
     assert client.get(f"/workouts/{journey_id}/{today().isoformat()}.zwo",
                       headers=athletes["anna"]).status_code == 404
 
@@ -164,3 +165,82 @@ def test_workout_generation_runs_end_to_end_with_a_fake_model(
     assert "LAST SEVEN DAYS" in responses.calls[0]["input"][0]["content"]
     zwo = client.get(f"/workouts/{journey_id}/{day.isoformat()}.zwo", headers=athletes["louis"])
     assert zwo.status_code == 200
+
+
+def test_build_journey_runs_for_the_chosen_weeks(client, athletes, no_background_plan):
+    res = client.post("/create-journey", headers=athletes["louis"], json={
+        "journey_name": "Winter fitness", "goal_type": "build", "weeks": 16, "start_date": "2099-11-02",
+        "current_ftp": 250, "current_weight": 75,
+    })
+    assert res.status_code == 200, res.text
+    journey = client.get(f"/journeys/{res.json()['journey_id']}", headers=athletes["louis"]).json()
+    assert journey["goal_type"] == "build" and journey["race_date"] == "2100-02-21"  # 16 × 7 days
+    assert no_background_plan[0][-1] == "build"
+    missing = client.post("/create-journey", headers=athletes["louis"], json={
+        "journey_name": "Winter", "goal_type": "build", "current_ftp": 250, "current_weight": 75,
+    })
+    assert missing.status_code == 400
+
+
+def active_week(client, headers, start, sessions):
+    """An active journey starting at `start` with (day_number, type, minutes, tss) sessions."""
+    journey_id = create_journey(client, headers)
+    db.execute("UPDATE journeys SET status = 'active', start_date = ?, race_date = ? WHERE id = ?",
+               [start.isoformat(), (start + timedelta(days=55)).isoformat(), journey_id])
+    for number, kind, minutes, tss in sessions:
+        db.execute(
+            "INSERT INTO master_plan (journey_id, date, day_number, phase, planned_workout_type,"
+            " planned_duration_min, planned_tss, description) VALUES (?, ?, ?, 'Build', ?, ?, ?, 'S.')",
+            [journey_id, (start + timedelta(days=number - 1)).isoformat(), number, kind, minutes, tss],
+        )
+    return journey_id
+
+
+def test_today_moves_a_missed_session_and_counts_the_ride(client, athletes, no_background_plan):
+    day = today()
+    start = day - timedelta(days=2)  # today is day 3 of the week
+    journey_id = active_week(client, athletes["louis"], start, [
+        (1, "Endurance", 60, 45), (2, "Threshold", 75, 85), (3, "Recovery", 45, 25), (4, "Rest", 0, 0),
+    ])
+    db.execute(
+        "INSERT INTO activities (id, athlete_id, start_date, start_date_local, moving_time, tss, tss_source)"
+        " VALUES (1, 1, ?, ?, 3600, 45, 'power')",
+        [f"{start.isoformat()}T17:00:00", f"{start.isoformat()}T18:00:00"],
+    )
+    view = client.get(f"/journeys/{journey_id}/today", headers=athletes["louis"]).json()
+    states = {s["planned_workout_type"]: s["state"] for s in view["week"]["sessions"]}
+    assert states == {"Endurance": "done", "Threshold": "open", "Recovery": "open", "Rest": "rest"}
+    assert view["suggestion"]["session"]["planned_workout_type"] == "Threshold"
+    assert view["suggestion"]["reason"].startswith("Moved from")
+    assert view["week"]["ridden_tss"] == 45 and view["week"]["planned_tss"] == 155
+
+
+def test_ftp_test_is_built_by_code_and_needs_its_time(client, athletes, no_background_plan, monkeypatch):
+    import logic.ai as ai
+
+    monkeypatch.setattr(ai, "get_openai", lambda: pytest.fail("the FTP test needs no model"))
+    journey_id = active_week(client, athletes["louis"], today() - timedelta(days=1),
+                             [(1, "Rest", 0, 0), (2, "FTP Test", 51, 65)])
+    body = {"journey_id": journey_id, "available_time": 45}
+    assert client.post("/generate-workout", headers=athletes["louis"], json=body).status_code == 400
+    res = client.post("/generate-workout", headers=athletes["louis"], json={**body, "available_time": 60})
+    assert res.status_code == 200 and "FTP Test (20 min)" in res.json()["workout"]
+    zwo = client.get(f"/workouts/{journey_id}/{today().isoformat()}.zwo", headers=athletes["louis"])
+    assert "<FreeRide" in zwo.text
+    row = db.query_one("SELECT plan_id, chosen_plan_id FROM daily_prescriptions")
+    assert row["plan_id"] == row["chosen_plan_id"] is not None
+
+
+def test_ftp_can_be_taken_over(client, athletes):
+    assert client.put("/ftp", headers=athletes["louis"], json={"ftp": 265}).status_code == 200
+    overview = client.get("/ftp", headers=athletes["louis"]).json()
+    assert overview["current"] == 265 and overview["history"][-1]["ftp"] == 265
+    assert overview["suggestion"] is None and overview["tests"] == []
+    assert client.get("/ftp", headers=athletes["anna"]).json()["current"] is None
+
+
+def test_checkin_keeps_motivation_and_trims_notes(client, athletes):
+    body = {"feel_score": 3, "soreness_score": 4, "motivation_score": 2, "notes": "  "}
+    assert client.post("/check-in", headers=athletes["louis"], json=body).status_code == 200
+    row = db.query_one("SELECT motivation_score, notes FROM daily_checkins")
+    assert row == {"motivation_score": 2, "notes": None}

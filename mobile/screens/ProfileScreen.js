@@ -5,15 +5,19 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import SetupProfile from '../components/SetupProfile';
 import { useSessionContext } from '../context/SessionContext';
 import { Ionicons } from '@expo/vector-icons';
-import { apiPost } from '../lib/api';
+import { apiGet, apiPost } from '../lib/api';
 import { APP_NAME } from '../theme';
 
 export default function ProfileScreen() {
   const [loading, setLoading] = useState(false);
   const [editing, setEditing] = useState(false);
+  const [ftp, setFtp] = useState(null);
   const { me, signOut, refresh } = useSessionContext();
 
-  useFocusEffect(useCallback(() => { refresh(); }, [refresh]));
+  useFocusEffect(useCallback(() => {
+    refresh();
+    apiGet('/ftp').then(setFtp).catch((e) => console.log('Could not load FTP:', e.message));
+  }, [refresh]));
 
   const handleSync = async () => {
     try {
@@ -66,6 +70,29 @@ export default function ProfileScreen() {
           <ProfileRow label="Weight" value={me?.weight_kg && `${me.weight_kg} kg`} last />
         </View>
       </View>
+
+      {ftp && (ftp.tests.length > 0 || ftp.history.length > 1) && (
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>FTP PROGRESS</Text>
+          <View style={styles.profileCard}>
+            {ftp.tests.map((t, i) => (
+              <ProfileRow
+                key={`test-${t.id}`}
+                label={`Test ${t.date}`}
+                value={`${t.best_20min_watts} W for 20 min → FTP ${t.ftp_estimate} W`}
+                last={i === ftp.tests.length - 1 && ftp.history.length < 2}
+              />
+            ))}
+            {ftp.history.length > 1 && (
+              <ProfileRow
+                label="FTP set"
+                value={ftp.history.slice(-4).map((h) => `${h.ftp}`).join(' → ') + ' W'}
+                last
+              />
+            )}
+          </View>
+        </View>
+      )}
 
       {/* ACTIONS */}
       <View style={styles.section}>

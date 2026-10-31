@@ -17,6 +17,7 @@ WorkoutType = Literal[
     "Threshold",
     "VO2 Max",
     "Anaerobic",
+    "FTP Test",  # placed and built by code (logic.ftp), never written by the model
     "Race",
 ]
 
@@ -46,7 +47,8 @@ class PlanBlock(BaseModel):
     days: list[PlanDay]
 
 
-StepKind = Literal["warmup", "steady", "intervals", "ramp", "cooldown"]
+# freeride: no power target (ERG off), for the all-out part of an FTP test only.
+StepKind = Literal["warmup", "steady", "intervals", "ramp", "cooldown", "freeride"]
 
 
 class WorkoutStep(BaseModel):

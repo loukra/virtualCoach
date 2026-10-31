@@ -1,9 +1,31 @@
 # Virtual Coach
 
 A personal AI cycling coach. It imports rides from Strava, tracks fitness and fatigue with the
-Banister model (CTL / ATL / TSB), lets an LLM build a periodized plan towards a race, and
-prescribes each day's workout from the plan, the athlete's check-in and the last week of
-training. Built for my own use (and a training partner), run on my own server.
+Banister model (CTL / ATL / TSB), lets an LLM build a periodized plan (towards a race, or a
+block of weeks to raise fitness, e.g. a winter on Zwift), and prescribes each day's workout from
+the plan, the athlete's check-ins and the last week of training. Workouts go to Zwift as `.zwo`
+files through the iPhone share sheet (AirDrop to the Mac). Built for my own use (and a training
+partner), run on my own server.
+
+## Training model
+
+- **Two goals.** *Race*: base, build, peak, taper to an event date. *Build fitness*: N weeks of
+  progressive load with recovery weeks and no race.
+- **Flexible weeks** (`logic/sessions.py`). A plan week is a set of sessions, each with a
+  suggested day. Whatever you ride completes the open session of that week that fits it best
+  (a hard ride the quality session, a long ride the long ride, an easy one the easy day), on any
+  day of the week. Missed sessions are not carried into the next week.
+- **What to ride today** is chosen in code: today's session if it suits you, otherwise a key
+  session that is overdue, never an intense one the day after a hard ride, a rest day only when
+  the week still has room for the open sessions. You can always pick another session.
+- **Check in any time** (energy, legs, motivation, a note). Low energy or legs force recovery;
+  several low check-ins in a row, legs heavy for days or a load spike (ATL far above CTL) rule
+  out hard sessions or force recovery before a single check-in would show it.
+- **FTP tests** (`logic/ftp.py`) are placed by code (week 1, then every five weeks; a fitness
+  block also ends with one; none in a race taper) and always ridden the same way: warmup, three
+  openers, 20 minutes all out in free-ride mode (ERG off). The best 20-minute power of each ride
+  is computed from the power stream; after a test the app suggests the new FTP (0.95 × 20-min
+  power), and a ride that beats the current FTP clearly suggests raising it even without a test.
 
 ```
 mobile/    Expo / React Native app; talks only to the backend
@@ -26,8 +48,10 @@ The model never produces anything the app uses unchecked.
    the available time, power targets as fractions of FTP, sustainable efforts, heart-rate caps.
 3. **Repair loop** (`logic/ai.py`). Violations go back to the model as a precise list; after
    `AI_MAX_ATTEMPTS` the generation fails visibly instead of storing a bad plan.
-4. **Hard rules before the model.** Low mood, sore legs or very negative form force a recovery
-   session (`logic/coach.py`); the model is told so and the guardrails enforce it.
+4. **Hard rules before the model.** Low mood, sore legs, very negative form or a run of low
+   check-ins force a recovery session (`logic/sessions.py`); the model is told so and the
+   guardrails enforce it. Which session is ridden today and the FTP test itself are decided in
+   code, never by the model.
 5. **Staged plan generation** (`logic/ai_planner.py`). One call for the weekly structure, then
    the days in four-week blocks checked against the weekly targets, so long plans never hit the
    output limit.
@@ -38,8 +62,9 @@ The model never produces anything the app uses unchecked.
 8. **Evals** (`backend/evals`). Fixed athlete scenarios, including a prompt-injection attempt,
    run against the real model. Beyond the guardrails they check coaching intent
    (`evals/checks.py`): does the main set match the planned session type, is the load right for
-   the plan and the available time, does a 10-week plan start near current fitness, build and
-   taper? Optionally a second model grades plan fit, safety and clarity (`--judge`; only in the
+   the plan and the available time, does a 10-week race plan start near current fitness, build
+   and taper, does a 12-week fitness plan keep its FTP tests, two quality sessions in most
+   build weeks and a load that keeps growing? Optionally a second model grades plan fit, safety and clarity (`--judge`; only in the
    evals, never in the app). `--runs N` repeats each scenario because answers vary; every run
    saves a JSON report with models and prompt versions and prints the change to the previous one.
 
@@ -96,7 +121,7 @@ cd backend
 .venv/bin/ruff check . && .venv/bin/pytest -q     # offline, no API keys needed
 .venv/bin/python -m evals.run_evals               # real model, needs OPENAI_API_KEY, a few cents
 .venv/bin/python -m evals.run_evals --runs 3      # each scenario three times, with pass rates
-.venv/bin/python -m evals.run_evals --plan --judge   # plus a 10-week plan and a judge model
+.venv/bin/python -m evals.run_evals --plan --judge   # plus a race and a fitness plan, and a judge
 ```
 
 CI runs lint and tests on every push and checks that the app bundles (catching import casing
@@ -112,16 +137,26 @@ the athlete is taken from the token, request bodies never carry an id.
 | GET | `/me` | profile, Strava and sync state |
 | PUT | `/profile` | goal, FTP, max heart rate, weight |
 | GET | `/metrics?days=90` | daily CTL / ATL / TSB |
+| GET | `/ftp` | FTP history, FTP test results, suggested new FTP |
+| PUT | `/ftp` | take over a new FTP (or confirm the old one, which dismisses the suggestion) |
 | GET | `/journeys`, `/journeys/{id}` | goals and their plan status |
-| GET | `/journeys/{id}/today` | today's planned day, check-in, workout and form |
-| GET | `/journeys/{id}/calendar` | the whole plan plus the rides done in its range |
+| GET | `/journeys/{id}/today` | today's suggested session and why, this week's sessions and state, check-in, warning signs, workout, form, FTP suggestion |
+| GET | `/journeys/{id}/calendar` | the whole plan with each session's state, plus the rides in its range |
 | DELETE | `/journeys/{id}` | hide a journey (data stays) |
 | POST | `/connect-strava` | OAuth code from the app; token exchange and 90-day import in the background |
 | POST | `/sync` | import new rides, recompute CTL/ATL/TSB |
-| POST | `/check-in` | today's mood and leg scores |
-| POST | `/create-journey` | create a goal and generate its plan in the background |
-| POST | `/generate-workout` | today's workout (cached per day and duration; `force` regenerates) |
-| GET | `/workouts/{journey_id}/{date}.zwo` | that day's workout as a Zwift file |
+| POST | `/check-in` | energy, legs, motivation, note (again later the same day replaces it) |
+| POST | `/create-journey` | `goal_type` race (with `race_date`) or build (with `weeks`); plan generated in the background |
+| POST | `/generate-workout` | today's workout for `plan_id` (default: the suggested session); cached per day, session and duration; `force` regenerates |
+| GET | `/workouts/{journey_id}/{date}.zwo` | that day's workout as a Zwift file, named after the workout |
+
+## Zwift
+
+In the app, *Send to Zwift (.zwo)* opens the share sheet: AirDrop the file to the Mac, then move
+it into `Documents/Zwift/Workouts/<your Zwift ID>/` (the folder with the number). Zwift lists it
+under *Custom Workouts* the next time it starts. A ride on a day the app prescribed a workout
+completes that workout's session. Otherwise a ride with "FTP" in its name (Zwift usually puts the
+workout's name into the activity name) completes the plan's FTP test.
 
 ## Known limits
 
@@ -131,5 +166,6 @@ the athlete is taken from the token, request bodies never carry an id.
 - Tokens are long-lived; revoke one with `manage.py new-token`.
 - No Strava webhooks: the app syncs when it opens. Deauthorizing on Strava's side does not yet
   delete the imported data.
+- Rides imported before the update have no 20-minute power; FTP suggestions start with new rides.
 - Background jobs run inside the API process (FastAPI `BackgroundTasks`); a restart during plan
   generation leaves the journey in `creating`.

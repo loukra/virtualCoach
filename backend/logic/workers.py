@@ -8,6 +8,7 @@ from core import db
 from logic.ai import GenerationError
 from logic.ai_planner import build_plan
 from logic.metrics import calculate_daily_metrics
+from logic.sessions import match_athlete_rides
 from logic.strava_auth import exchange_code_for_token
 from logic.strava_sync import backfill_missing_activities
 
@@ -24,6 +25,7 @@ def run_ai_plan_generation(
     race_date: date,
     current_date: date,
     current_ctl: float,
+    goal_type: str = "race",
 ) -> None:
     try:
         longest = db.query_one(
@@ -32,8 +34,8 @@ def run_ai_plan_generation(
         )
         days = build_plan(
             athlete_id=athlete_id, journey_id=journey_id, goal=goal, start_date=start_date,
-            race_date=race_date, current_date=current_date, ftp=ftp, weight=weight,
-            current_ctl=current_ctl,
+            race_date=race_date, current_date=current_date, ftp_watts=ftp, weight=weight,
+            current_ctl=current_ctl, goal_type=goal_type,
             longest_ride_min=round(longest["s"] / 60) if longest and longest["s"] else None,
         )
         rows = [
@@ -91,6 +93,7 @@ def run_onboarding_process(athlete_id: int, code: str) -> None:
             raise strava_exc.AuthError("Strava token exchange failed")
         backfill_missing_activities(athlete_id, days_back=90)
         calculate_daily_metrics(athlete_id)
+        match_athlete_rides(athlete_id)
         _set_sync_status(athlete_id, "completed")
     except Exception as e:
         log.exception("Onboarding failed for athlete %s", athlete_id)
@@ -102,6 +105,7 @@ def run_sync(athlete_id: int, days_back: int = 7) -> None:
         if backfill_missing_activities(athlete_id, days_back) is None:
             return  # another sync is running and will report the outcome
         calculate_daily_metrics(athlete_id)
+        match_athlete_rides(athlete_id)
         _set_sync_status(athlete_id, "completed")
     except Exception as e:
         log.exception("Sync failed for athlete %s", athlete_id)

@@ -129,3 +129,24 @@ def test_race_day_itself_does_not_count_against_the_taper():
     taper[-1] = PlanDay(day_number=0, phase="Race", planned_workout_type="Race",
                         planned_duration_min=330, planned_tss=232, description="Race.")
     assert not any(p.startswith("no taper") for p in plan_checks(taper, current_ctl=25))
+
+
+def test_fitness_plan_needs_its_tests_and_quality_work():
+    def build_week(quality, tss=60):
+        types = ["Rest", "Endurance", "Threshold", "Recovery", "Endurance", "Endurance", "Rest"]
+        if quality == 2:
+            types[4] = "VO2 Max"
+        return [PlanDay(day_number=0, phase="Build", planned_workout_type=t,
+                        planned_duration_min=0 if t == "Rest" else 60,
+                        planned_tss=0 if t == "Rest" else tss, description="S.") for t in types]
+
+    days = build_week(2) + build_week(2, 66) + build_week(2, 72)
+    for n, d in enumerate(days, start=1):
+        d.day_number = n
+    days[1].planned_workout_type = "FTP Test"
+    assert plan_checks(days, current_ctl=40, goal_type="build", test_days=[2]) == []
+    assert plan_checks(days, current_ctl=40, goal_type="build", test_days=[2, 9]) == [
+        "FTP tests on days [2], expected [2, 9]"
+    ]
+    thin = build_week(1) + build_week(1, 66) + build_week(2, 72)
+    assert "2 of 3 build weeks have fewer than two quality sessions" in plan_checks(thin, 40, "build")
