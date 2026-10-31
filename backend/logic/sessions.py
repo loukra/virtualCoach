@@ -11,6 +11,7 @@ from datetime import date, timedelta
 
 from core import db
 from core.dates import monday_of
+from logic.events import load_events
 
 KEY_TYPES = {"FTP Test", "VO2 Max", "Anaerobic", "Threshold", "Sweet Spot"}
 INTENSE_TYPES = {"FTP Test", "VO2 Max", "Anaerobic", "Threshold"}  # never the day after a hard ride
@@ -321,6 +322,24 @@ def choose_session(week: list[dict], day: date, week_end: date, ready: dict) -> 
     return {"mode": "recovery", "session": None, "reason": reason}
 
 
+def mark_time_off(rows: list[dict], athlete_id: int) -> list[dict]:
+    """Open sessions that fall on days off (an 'off' event) are dropped from the week: status
+    'off', so they are neither suggested, moved nor counted as missed."""
+    if not rows:
+        return rows
+    first, last = date.fromisoformat(rows[0]["date"]), date.fromisoformat(rows[-1]["date"])
+    off = {
+        (date.fromisoformat(e["start_date"]) + timedelta(days=i)).isoformat()
+        for e in load_events(athlete_id, first, last)
+        if e["kind"] == "off"
+        for i in range((date.fromisoformat(e["end_date"]) - date.fromisoformat(e["start_date"])).days + 1)
+    }
+    for row in rows:
+        if row["status"] == "open" and row["date"] in off:
+            row["status"] = "off"
+    return rows
+
+
 def week_sessions(journey: dict, day: date) -> tuple[list[dict], date, date, int]:
     """The plan week that contains `day`, its sessions with status and completing ride."""
     start, end = date.fromisoformat(journey["start_date"]), date.fromisoformat(journey["race_date"])
@@ -337,4 +356,4 @@ def week_sessions(journey: dict, day: date) -> tuple[list[dict], date, date, int
     )
     for row in rows:
         row["week_end"] = last.isoformat()
-    return rows, first, last, week
+    return mark_time_off(rows, journey["athlete_id"]), first, last, week

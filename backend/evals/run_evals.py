@@ -27,14 +27,15 @@ for key, value in {"STRAVA_CLIENT_ID": "0", "STRAVA_CLIENT_SECRET": "unused"}.it
 
 import logic.ai as ai  # noqa: E402
 from core.config import get_settings  # noqa: E402
-from core.dates import end_after_weeks  # noqa: E402
+from core.dates import end_after_weeks, monday_of  # noqa: E402
 from evals.checks import plan_checks, workout_checks  # noqa: E402
 from evals.judge import judge_workout, verdict_problems  # noqa: E402
 from logic import ftp  # noqa: E402
 from logic.ai import GenerationError, generate_structured, load_prompt  # noqa: E402
 from logic.ai_planner import build_plan  # noqa: E402
 from logic.coach import forced_recovery_reason, workout_input  # noqa: E402
-from logic.guardrails import validate_workout  # noqa: E402
+from logic.events import place_tests, plan_events  # noqa: E402
+from logic.guardrails import event_day_errors, validate_workout  # noqa: E402
 from logic.schemas import Workout  # noqa: E402
 from logic.workout_math import estimate_tss, total_duration_s  # noqa: E402
 
@@ -109,7 +110,25 @@ PLAN_SCENARIOS = {
                            "weeks": 10},
     "plan_build_12_weeks": {"goal": "Get fitter over the winter on Zwift", "goal_type": "build",
                             "weeks": 12},
+    # Events by (kind, calendar week, weekday 0-6, name, priority, minutes, days): a secondary
+    # race, a group ride, five days off and a main race inside a fitness block.
+    "plan_build_with_events": {
+        "goal": "Get fitter over the winter, with a few races", "goal_type": "build", "weeks": 12,
+        "events": [("ride", 3, 5, "Club RTF", None, 240, 1), ("race", 4, 6, "Crit", "B", 60, 1),
+                   ("off", 7, 2, "Ski trip", None, None, 5), ("race", 10, 5, "Spring Classic", "A", 180, 1)],
+    },
 }
+
+
+def scenario_events(s: dict, start_date: date) -> list[dict]:
+    first_monday = monday_of(start_date)
+    rows = []
+    for kind, week, weekday, name, priority, minutes, length in s.get("events", []):
+        day = first_monday + timedelta(days=(week - 1) * 7 + weekday)
+        rows.append({"kind": kind, "name": name, "start_date": day.isoformat(),
+                     "end_date": (day + timedelta(days=length - 1)).isoformat(),
+                     "priority": priority, "duration_min": minutes})
+    return rows
 
 
 def run_plan_scenario(name: str) -> dict:
@@ -120,17 +139,21 @@ def run_plan_scenario(name: str) -> dict:
         total_days = (end_after_weeks(start_date, s["weeks"]) - start_date).days + 1
     else:
         total_days = s["weeks"] * 7
+    events = scenario_events(s, start_date)
+    ev = plan_events(events, start_date, total_days, s["goal_type"], s["goal"])
     start = len(attempt_log)
     started = time.monotonic()
     try:
         days = build_plan(
             athlete_id=None, journey_id=None, goal=s["goal"], start_date=start_date,
             race_date=start_date + timedelta(days=total_days - 1), current_date=start_date, ftp_watts=250,
-            weight=75, current_ctl=PLAN_CTL, longest_ride_min=180, goal_type=s["goal_type"],
+            weight=75, current_ctl=PLAN_CTL, longest_ride_min=180, goal_type=s["goal_type"], events=events,
         )
         problems = [] if len(days) == total_days else [f"{len(days)} days instead of {total_days}"]
-        tests = ftp.test_days(total_days, s["goal_type"], offset)
-        problems += plan_checks(days, PLAN_CTL, s["goal_type"], tests, offset)
+        last_test_day = total_days - 1 if s["goal_type"] == "race" else total_days
+        tests = place_tests(ftp.test_days(total_days, s["goal_type"], offset), ev, last_test_day)
+        problems += plan_checks(days, PLAN_CTL, s["goal_type"], tests, offset, ev)
+        problems += event_day_errors(days, ev)
     except GenerationError as e:
         days, problems = [], e.errors
     attempts = attempt_log[start:]

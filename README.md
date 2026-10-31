@@ -16,7 +16,17 @@ partner), run on my own server.
   *scheduled*: its plan is generated on its start day (after the app's Strava sync), from the
   fitness and FTP of that day. A plan that starts right after a race opens with easy days.
 - **Calendar weeks.** Plan weeks run Monday to Sunday; a plan started mid-week has a short
-  first week.
+  first week. The calendar shows all journeys as one timeline.
+- **Races and events** (`logic/events.py`). Added with the plus, kept per athlete, and planned
+  by whichever journey covers their date (also a journey that is only planned later):
+  - *main race*: its own Race week with less load, easy days around it, no FTP test that week
+    or the week after; a race journey's own race counts as one;
+  - *secondary race*: ridden from normal training, one easy day before and after;
+  - *group ride*: an Endurance day of about the given length;
+  - *time off*: Rest days; the week's load drops, an FTP test in the way moves a week later.
+  The guardrails check every one of these. Adding or removing an event rebuilds an active plan
+  from next Monday (the weeks before stay as they are); within the current week, today's
+  suggestion follows the event and sessions on days off drop out instead of counting as missed.
 - **Flexible weeks** (`logic/sessions.py`). A plan week is a set of sessions, each with a
   suggested day. Whatever you ride completes the open session of that week that fits it best
   (a hard ride the quality session, a long ride the long ride, an easy one the easy day), on any
@@ -148,6 +158,11 @@ the athlete is taken from the token, request bodies never carry an id.
 | GET | `/journeys`, `/journeys/{id}` | goals and their plan status |
 | GET | `/journeys/{id}/today` | today's suggested session and why, this week's sessions and state, check-in, warning signs, workout, form, FTP suggestion |
 | GET | `/journeys/{id}/calendar` | the whole plan with each session's state, plus the rides in its range |
+| GET | `/calendar` | one timeline over all journeys: planned days with state, rides and events |
+| GET | `/events` | races, group rides and time off (from three months back) |
+| POST | `/events` | add one (`kind` race with `priority` A/B, ride, or off with `end_date`); returns what happens to each covering journey: rebuilt from Monday, planned at its start, or this week only |
+| DELETE | `/events/{id}` | remove one; covering plans adapt the same way |
+| POST | `/journeys/{id}/replan` | rebuild the plan from next Monday (also: retry after a failed rebuild) |
 | DELETE | `/journeys/{id}` | hide a journey (data stays) |
 | POST | `/connect-strava` | OAuth code from the app; token exchange and 90-day import in the background |
 | POST | `/sync` | import new rides, recompute CTL/ATL/TSB |

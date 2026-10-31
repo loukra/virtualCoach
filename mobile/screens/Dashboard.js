@@ -5,13 +5,19 @@ import {
   Text, 
   TouchableOpacity, 
   FlatList, 
-  ActivityIndicator 
+  ActivityIndicator,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { APP_NAME } from '../theme';
 import { apiGet, apiPost } from '../lib/api';
 import CreateJourneyModal from '../components/CreateJourneyModal';
+import AddEventModal from '../components/AddEventModal';
+import EventList from '../components/EventList';
+import Toast from '../components/Toast';
+import AddMenu from '../components/AddMenu';
+import { EVENT_KINDS, eventWhen, journeyEvents } from '../lib/events';
+import { localDateString } from '../lib/dates';
 import { useJourney } from '../context/JourneyContext';
 import { useSessionContext } from '../context/SessionContext';
 // 👇 IMPORT NAVIGATION HOOK
@@ -24,6 +30,13 @@ export default function Dashboard() {
   const [journeys, setJourneys] = useState([]);
   const [isSyncing, setIsSyncing] = useState(false);
   const [createModalVisible, setCreateModalVisible] = useState(false);
+  const [events, setEvents] = useState([]);
+  const [eventKind, setEventKind] = useState(null); // the AddEventModal is open for this kind
+  const [note, setNote] = useState(null);
+  const onEventsChanged = (message) => {
+    setNote(message);
+    fetchJourneys();
+  };
 
   // New Strava rides once per app start; the list reloads whenever the tab comes back into view.
   useEffect(() => {
@@ -36,8 +49,8 @@ export default function Dashboard() {
     }, [])
   );
 
-  // While a plan is being built, check every few seconds so the card updates on its own.
-  const anyCreating = journeys.some((j) => j.status === 'creating');
+  // While a plan is being built or adapted, check every few seconds so the card updates on its own.
+  const anyCreating = journeys.some((j) => j.status === 'creating' || j.replanning);
   useEffect(() => {
     if (!anyCreating) return undefined;
     const timer = setInterval(fetchJourneys, 4000);
@@ -46,7 +59,9 @@ export default function Dashboard() {
 
   const fetchJourneys = async () => {
     try {
-      setJourneys(await apiGet('/journeys'));
+      const [js, evs] = await Promise.all([apiGet('/journeys'), apiGet('/events')]);
+      setJourneys(js);
+      setEvents(evs);
     } catch (e) {
       console.log('Could not load journeys:', e.message);
     }
@@ -69,9 +84,21 @@ export default function Dashboard() {
     fetchJourneys(); 
   };
 
+  // The plus adds a journey or something the plans work around.
+  const ADD_OPTIONS = [
+    { label: 'New journey', icon: 'trending-up', color: '#ff4d4d', run: () => setCreateModalVisible(true) },
+    ...Object.entries(EVENT_KINDS).map(([kind, k]) => ({ label: k.label, icon: k.icon, color: k.color, run: () => setEventKind(kind) })),
+  ];
+
+  // Events no journey covers yet: a journey planned for those dates later takes them into account.
+  const today = localDateString(new Date());
+  const looseEvents = events.filter((e) => e.end_date >= today
+    && !journeys.some((j) => e.start_date <= j.race_date && e.end_date >= j.start_date));
+
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
       <CreateJourneyModal visible={createModalVisible} onClose={() => setCreateModalVisible(false)} onJourneyCreated={handleJourneyCreated} />
+      <AddEventModal visible={!!eventKind} kind={eventKind || 'race'} onClose={() => setEventKind(null)} onSaved={onEventsChanged} />
 
       {/* --- HEADER (Updated for Bottom Tabs) --- */}
       <View style={styles.header}>
@@ -124,13 +151,15 @@ export default function Dashboard() {
                                 {item.goal_type === 'build' ? `Build fitness · until ${item.race_date}` : `Race: ${item.race_date}`}
                               </Text>
                               {item.status === 'creating' && <Text style={styles.cardStatus}>Building plan…</Text>}
+                              {item.replanning ? <Text style={styles.cardStatus}>Adapting plan to your events…</Text> : null}
+                              <NextEvent journey={item} events={events} today={today} />
                               {item.status === 'scheduled' && (
                                 <Text style={styles.cardStatus}>Starts {item.start_date} · plan built on that day</Text>
                               )}
                               {item.status === 'failed' && <Text style={[styles.cardStatus, {color:'#ff4d4d'}]}>Plan failed</Text>}
                           </View>
                           <View style={{alignItems:'flex-end'}}>
-                              {item.status === 'creating' ? (
+                              {item.status === 'creating' || item.replanning ? (
                                   <ActivityIndicator color="#ff4d4d" />
                               ) : (
                                   <Ionicons name="chevron-forward" size={24} color="#666" />
@@ -138,18 +167,35 @@ export default function Dashboard() {
                           </View>
                       </TouchableOpacity>
                   )}
+                  ListFooterComponent={looseEvents.length > 0 ? (
+                      <View style={styles.looseBox}>
+                          <Text style={styles.looseTitle}>NOT IN A JOURNEY YET</Text>
+                          <EventList events={looseEvents} onChanged={onEventsChanged} />
+                          <Text style={styles.looseHint}>A journey covering these dates will plan around them.</Text>
+                      </View>
+                  ) : null}
                   ListEmptyComponent={
-                      <Text style={{color:'#666', textAlign:'center', marginTop: 50, lineHeight: 22}}>No journeys yet.{'\n'}Tap + to plan your next goal.</Text>
+                      <Text style={{color:'#666', textAlign:'center', marginTop: 50, lineHeight: 22}}>No journeys yet.{'\n'}Tap + to plan your next goal, or add a race.</Text>
                   }
               />
 
-              {/* FLOATING CREATE BUTTON */}
-              <TouchableOpacity style={styles.fab} onPress={() => setCreateModalVisible(true)}>
-                  <Ionicons name="add" size={30} color="white" />
-              </TouchableOpacity>
           </View>
       </View>
+      <Toast message={note} onHide={() => setNote(null)} bottom={104} />
+      <AddMenu options={ADD_OPTIONS} />
     </SafeAreaView>
+  );
+}
+
+// The journey's next race or break, so the list shows what is coming.
+function NextEvent({ journey, events, today }) {
+  const next = journeyEvents(journey, events).find((e) => e.end_date >= today && !e.goal);
+  if (!next) return null;
+  return (
+    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5, marginTop: 6 }}>
+      <Ionicons name={EVENT_KINDS[next.kind].icon} size={12} color={EVENT_KINDS[next.kind].color} />
+      <Text style={{ color: '#aaa', fontSize: 12 }}>{next.name} · {eventWhen(next)}</Text>
+    </View>
   );
 }
 
@@ -169,6 +215,8 @@ const styles = StyleSheet.create({
   cardDate: { color: '#888', fontSize: 12, marginTop: 4 },
   cardStatus: { color: '#888', fontSize: 12, marginTop: 4, fontStyle: 'italic' },
   
-  // FAB (Floating Action Button)
-  fab: { position: 'absolute', bottom: 30, right: 20, backgroundColor: '#ff4d4d', width: 60, height: 60, borderRadius: 30, justifyContent: 'center', alignItems: 'center', elevation: 5, shadowColor:'#000', shadowOffset:{width:0,height:4}, shadowOpacity:0.3, shadowRadius:4 },
+  looseBox: { marginTop: 25, marginBottom: 90 },
+  looseTitle: { color: '#666', fontSize: 12, fontWeight: 'bold', letterSpacing: 1, marginBottom: 4 },
+  looseHint: { color: '#666', fontSize: 12, marginTop: 8 },
+
 });

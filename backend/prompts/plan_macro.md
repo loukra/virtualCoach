@@ -11,12 +11,22 @@ Coaching rules for every plan:
 - If the plan started in the past, the weeks up to today describe what the athlete has been
   doing; today's week must fit their current CTL.
 
+Events (listed under EVENTS, dates fixed by the athlete):
+- A main race gets its own Race week with clearly less load than the weeks before; the week
+  before it may taper. After it, the build continues with an easier week.
+- A secondary race is ridden from normal training: its week keeps its usual phase and load.
+- A week with days off carries load only for the days left, and the week after it starts
+  again from the level before the break, not above it.
+- When weeks are listed as ALREADY PLANNED, return only the weeks after them and continue
+  smoothly from the last planned week.
+
 Plan type RACE:
 - Periodize: Base, then Build, then Peak, then Taper, ending with race week. Short plans may skip Base.
 - Taper the final one to two weeks; race week carries clearly less load than the weeks before.
 
-Plan type BUILD FITNESS (no race):
-- Periodize with Base, Build and Recovery weeks only; never Race, Taper or Peak.
+Plan type BUILD FITNESS (no goal race at the end):
+- Periodize with Base, Build and Recovery weeks; Race and Taper only for main races listed
+  under EVENTS, never Peak.
 - Start with aerobic base, then add more Sweet Spot, Threshold and VO2 Max work as the weeks go on,
   so FTP rises steadily from one test to the next.
 - Load grows across the block towards the LOAD TARGET: start every build phase after a

@@ -14,6 +14,9 @@ Coaching rules:
   use the weekday list to place them).
 - FTP Test appears exactly on the days listed under FTP TESTS, with the duration and TSS given
   there, and on no other day. The day before each test is Rest or Recovery.
+- Events listed under EVENTS are fixed: each race day is Race (lasting the given time when one
+  is given), a group ride is Endurance for about the given time, a day without training is Rest,
+  and the days marked "no hard training" are Rest, Recovery or Endurance. Race only on race days.
 - Descriptions are one or two plain sentences on the session's purpose and main set.
 
 Plan type RACE:
@@ -24,8 +27,8 @@ Plan type RACE:
   toward the race: in the four weeks before the taper the longest ride reaches at least two
   thirds of the expected race duration.
 
-Plan type BUILD FITNESS (no race):
-- Never use Race. Most weeks hold two quality sessions (Sweet Spot, Threshold or VO2 Max) and
+Plan type BUILD FITNESS:
+- Use Race only on the race days listed under EVENTS. Most weeks hold two quality sessions (Sweet Spot, Threshold or VO2 Max) and
   one longer endurance ride; the rest is easy.
 - Build the long ride gradually from the athlete's longest recent ride.
 

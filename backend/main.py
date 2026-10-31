@@ -5,7 +5,7 @@ from fastapi import FastAPI
 
 from core import db
 from core.config import get_settings
-from routers import athlete, checkin, dailysync, journeys, strava, workout
+from routers import athlete, checkin, dailysync, events, journeys, strava, workout
 
 
 @asynccontextmanager
@@ -38,3 +38,4 @@ app.include_router(dailysync.router)
 app.include_router(workout.router)
 app.include_router(strava.router)
 app.include_router(checkin.router)
+app.include_router(events.router)

@@ -6,11 +6,12 @@ may be used; otherwise the violations go back to the model as a repair request
 broken plans, not stylistic preferences.
 """
 from collections import Counter
-from collections.abc import Collection
+from collections.abc import Collection, Sequence
 
 from core.dates import plan_week
+from logic.events import DURATION_TOLERANCE, PlanEvents
 from logic.ftp import TEST_DURATION_MIN, TEST_TSS
-from logic.schemas import MacroPlan, PlanDay, Workout
+from logic.schemas import MacroPlan, PlanDay, PlanWeek, Workout
 from logic.workout_math import max_power, step_segments, total_duration_s
 
 MAX_DAY_MINUTES = 360
@@ -41,25 +42,39 @@ def week_lengths(total_days: int, offset: int) -> Counter:
     return Counter(plan_week(n, offset) for n in range(1, total_days + 1))
 
 
+def default_events(total_days: int, goal_type: str, offset: int) -> PlanEvents:
+    """No events given: a race plan still ends with its main race."""
+    ev = PlanEvents(offset=offset)
+    if goal_type == "race":
+        ev.races[total_days] = {"name": "the race", "duration_min": None, "priority": "A"}
+    return ev
+
+
 def validate_macro(
-    macro: MacroPlan, total_days: int, goal_type: str = "race", ctl: float | None = None, offset: int = 0
+    macro: MacroPlan, total_days: int, goal_type: str = "race", ctl: float | None = None, offset: int = 0,
+    events: PlanEvents | None = None, fixed: Sequence[PlanWeek] = (),
 ) -> list[str]:
+    """`fixed` are the weeks already planned when a plan is rebuilt: the model returns the rest,
+    and only problems it can still change are reported."""
     errors: list[str] = []
+    ev = events or default_events(total_days, goal_type, offset)
     expected = plan_week(total_days, offset)
     lengths = week_lengths(total_days, offset)
-    weeks = macro.weeks
-    if [w.week_number for w in weeks] != list(range(1, expected + 1)):
-        errors.append(f"Return exactly {expected} weeks numbered 1 to {expected}.")
-        return errors
+    kept = len(fixed)
+    if [w.week_number for w in macro.weeks] != list(range(kept + 1, expected + 1)):
+        if not kept:
+            return [f"Return exactly {expected} weeks numbered 1 to {expected}."]
+        return [f"Return only the weeks {kept + 1} to {expected}; weeks 1 to {kept} are already planned."]
+    weeks = [*fixed, *macro.weeks]
 
-    for w in weeks:
+    for w in macro.weeks:
         if not 0 <= w.target_tss <= 1500:
             errors.append(f"Week {w.week_number}: target_tss {w.target_tss} is outside 0-1500.")
 
     def per_week(w):  # a short week's load scaled to seven days, so short weeks compare fairly
         return w.target_tss * 7 / lengths[w.week_number]
 
-    if lengths[1] < 7 and weeks[0].target_tss > ((ctl or 0) * 7 + 60) * lengths[1] / 7 + 30:
+    if not kept and lengths[1] < 7 and weeks[0].target_tss > ((ctl or 0) * 7 + 60) * lengths[1] / 7 + 30:
         errors.append(
             f"Week 1 has only {lengths[1]} days: plan load for those days only, at most"
             f" about {round(((ctl or 0) * 7 + 60) * lengths[1] / 7)} TSS."
@@ -67,6 +82,8 @@ def validate_macro(
     # Compared with the strongest of the last four weeks: returning to the build level after a
     # recovery week is normal, only going clearly beyond it is a jump.
     for i, cur in enumerate(weeks[1:], start=1):
+        if i < kept:
+            continue
         ref = max(weeks[max(0, i - 4) : i], key=per_week)
         if per_week(cur) > per_week(ref) * 1.25 + 60:
             errors.append(
@@ -74,9 +91,15 @@ def validate_macro(
                 f" {ref.target_tss} in the weeks before; keep increases at or below about 25 %."
             )
 
+    main_weeks = ev.main_race_weeks
     if goal_type == "build":
-        if any(w.phase in ("Race", "Taper") for w in weeks):
-            errors.append("This plan builds fitness without a race: use no Race or Taper weeks.")
+        allowed = set(main_weeks) | {w - 1 for w in main_weeks}
+        if any(w.phase in ("Race", "Taper") and w.week_number not in allowed for w in macro.weeks):
+            errors.append(
+                "This plan builds fitness: use Race or Taper only in a main race week and the week"
+                " before it." if main_weeks
+                else "This plan builds fitness without a race: use no Race or Taper weeks."
+            )
         least = build_peak_tss(ctl, expected, 0.8) if ctl is not None and expected >= 8 else 0
         if max(w.target_tss for w in weeks) < least:
             errors.append(
@@ -85,13 +108,20 @@ def validate_macro(
             )
     elif weeks[-1].phase not in ("Race", "Taper"):
         errors.append("The last week must be a Race or Taper week.")
-    if goal_type == "race" and expected >= 4:
-        build = [w.target_tss for w in weeks[-4:-1]]
-        if weeks[-1].target_tss >= sum(build) / len(build):
-            errors.append("Race week load must be below the average of the three weeks before it.")
+    for number, name in sorted(main_weeks.items()):
+        i = number - 1
+        if i < 3 or number <= kept:
+            continue
+        build = [w.target_tss for w in weeks[i - 3 : i]]
+        if weeks[i].target_tss >= sum(build) / len(build):
+            what = ("Race week" if number == expected and goal_type == "race"
+                    else f"Week {number} (main race \"{name}\")")
+            errors.append(f"{what} load must be below the average of the three weeks before it.")
 
     for start in range(0, len(weeks) - 4):
         window = weeks[start : start + 5]
+        if window[-1].week_number <= kept:
+            continue
         has_easier_week = any(
             w.phase in ("Recovery", "Taper", "Race") or w.target_tss < p.target_tss
             for p, w in zip(window, window[1:], strict=False)
@@ -114,8 +144,12 @@ def validate_days(
     test_days: Collection[int] = (),
     offset: int = 0,
     easy_days: int = 0,
+    events: PlanEvents | None = None,
 ) -> list[str]:
     errors: list[str] = []
+    ev = events or default_events(total_days, goal_type, offset)
+    for n in range(1, easy_days + 1):
+        ev.easy.setdefault(n, "the race just before this plan")
     if [d.day_number for d in days] != list(range(first_day, last_day + 1)):
         return [f"Return exactly the days {first_day} to {last_day}, one entry per day, in order."]
     by_number = {d.day_number: d for d in days}
@@ -143,14 +177,8 @@ def validate_days(
                 " possible; lower the TSS or extend the duration."
             )
 
-    if goal_type == "race" and last_day == total_days and days[-1].planned_workout_type != "Race":
-        errors.append(f"Day {total_days} is race day: planned_workout_type must be Race.")
-    if goal_type == "build" and any(d.planned_workout_type == "Race" for d in days):
-        errors.append("This plan has no race: use no Race days.")
-
+    errors += event_day_errors(days, ev)
     for d in days:
-        if d.day_number <= easy_days and d.planned_workout_type not in EASY_TYPES | {"Endurance"}:
-            errors.append(f"Day {d.day_number} follows the race: make it Rest, Recovery or Endurance.")
         if d.planned_workout_type == "FTP Test" and d.day_number not in test_days:
             errors.append(f"Day {d.day_number}: FTP Test only on the days listed under FTP TESTS.")
     for n in test_days:
@@ -173,15 +201,51 @@ def validate_days(
     for week, week_days in by_week.items():
         if len(week_days) < 7:
             continue  # short first week, or the week of race day
+        days_off = sum(d.day_number in ev.off for d in week_days)
         if not any(d.planned_workout_type in EASY_TYPES for d in week_days):
             errors.append(f"Week {week}: include at least one Rest or Recovery day.")
         target = week_targets.get(week)
         actual = sum(d.planned_tss for d in week_days)
-        if target and abs(actual - target) > target * 0.25 + 30:
+        # Days off can leave a week below its target, never above it.
+        if target and (actual - target > target * 0.25 + 30
+                       or (not days_off and target - actual > target * 0.25 + 30)):
             errors.append(
                 f"Week {week}: days sum to {actual} TSS but the week target is {target};"
                 " stay within about 25 %."
             )
+    return errors
+
+
+def event_day_errors(days: list[PlanDay], ev: PlanEvents) -> list[str]:
+    """Race days are Race, group rides Endurance, days off Rest, the days around races easy."""
+    errors = []
+
+    def length_error(d: PlanDay, what: str, minutes: int | None) -> str | None:
+        if minutes and abs(d.planned_duration_min - minutes) > minutes * DURATION_TOLERANCE:
+            return f"Day {d.day_number}: {what} lasts about {minutes} minutes; plan the day for that."
+        return None
+
+    for d in days:
+        n, kind = d.day_number, d.planned_workout_type
+        if n in ev.races:
+            race = ev.races[n]
+            if kind != "Race":
+                errors.append(f"Day {n} is race day (\"{race['name']}\"): planned_workout_type must be Race.")
+            elif error := length_error(d, f"the race \"{race['name']}\"", race["duration_min"]):
+                errors.append(error)
+        elif kind == "Race":
+            errors.append(f"Day {n}: Race only on the race days listed under EVENTS."
+                          if ev.races else "This plan has no race: use no Race days.")
+        elif n in ev.rides:
+            ride = ev.rides[n]
+            if kind != "Endurance":
+                errors.append(f"Day {n} is the group ride \"{ride['name']}\": make it Endurance.")
+            elif error := length_error(d, f"the group ride \"{ride['name']}\"", ride["duration_min"]):
+                errors.append(error)
+        elif n in ev.off and kind != "Rest":
+            errors.append(f"Day {n} has no training ({ev.off[n]}): make it Rest.")
+        elif n in ev.easy and kind not in EASY_TYPES | {"Endurance"}:
+            errors.append(f"Day {n} is next to {ev.easy[n]}: make it Rest, Recovery or Endurance.")
     return errors
 
 

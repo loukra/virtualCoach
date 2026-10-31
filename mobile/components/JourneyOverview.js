@@ -5,9 +5,13 @@ import { Ionicons } from '@expo/vector-icons';
 import Markdown from 'react-native-markdown-display';
 import { apiDelete, apiGet, apiPost, apiPut } from '../lib/api';
 import { localDateString, parseLocalDate, weekdayName } from '../lib/dates';
+import { journeyEvents } from '../lib/events';
 import { shareWorkout } from '../lib/share';
 import { colors, TYPE_COLORS } from '../theme';
+import AddEventModal from './AddEventModal';
 import CheckInModal from './CheckInModal';
+import EventList from './EventList';
+import Toast from './Toast';
 
 const TIME_OPTIONS = [30, 45, 60, 75, 90, 120, 150, 180];
 const FTP_TEST_MINUTES = 51; // logic.ftp.TEST_DURATION_MIN
@@ -49,6 +53,9 @@ export default function JourneyOverview({ route, navigation }) {
   const [loadingWorkout, setLoadingWorkout] = useState(false);
   const [sharing, setSharing] = useState(false);
   const [showCheckInModal, setShowCheckInModal] = useState(false);
+  const [events, setEvents] = useState([]);
+  const [showAddEvent, setShowAddEvent] = useState(false);
+  const [note, setNote] = useState(null);
 
   const pollingRef = useRef(null);
 
@@ -71,23 +78,33 @@ export default function JourneyOverview({ route, navigation }) {
     try {
       const data = await apiGet(`/journeys/${journeyId}`);
       setJourney(data);
-      if (data.status === 'creating') startPolling();
+      if (isBusy(data)) startPolling();
     } catch (e) {
       Alert.alert('Error', e.message);
     }
   }, [journeyId]);
 
+  const loadEvents = useCallback(async () => {
+    try {
+      setEvents(await apiGet('/events'));
+    } catch (e) {
+      console.log('Error loading events:', e.message);
+    }
+  }, []);
+
   useEffect(() => {
     loadJourney();
     loadToday();
+    loadEvents();
     return () => { if (pollingRef.current) clearInterval(pollingRef.current); };
   }, [journeyId]);
 
+  // While the plan is built or adapted to new events, check every few seconds.
   const startPolling = () => {
     if (pollingRef.current) return;
     pollingRef.current = setInterval(async () => {
       const data = await apiGet(`/journeys/${journeyId}`).catch(() => null);
-      if (data && data.status !== 'creating') {
+      if (data && !isBusy(data)) {
         clearInterval(pollingRef.current);
         pollingRef.current = null;
         setJourney(data);
@@ -98,7 +115,7 @@ export default function JourneyOverview({ route, navigation }) {
 
   const onRefresh = async () => {
     setRefreshing(true);
-    await Promise.all([loadJourney(), loadToday()]);
+    await Promise.all([loadJourney(), loadToday(), loadEvents()]);
     setRefreshing(false);
   };
 
@@ -142,6 +159,22 @@ export default function JourneyOverview({ route, navigation }) {
     }
   };
 
+  const onEventsChanged = (message) => {
+    setNote(message);
+    loadEvents();
+    loadToday(); // a race or day off today changes today's suggestion
+    loadJourney(); // a rebuild may have started
+  };
+
+  const handleRetryReplan = async () => {
+    try {
+      await apiPost(`/journeys/${journeyId}/replan`);
+      loadJourney();
+    } catch (e) {
+      Alert.alert('Could not adapt the plan', e.message);
+    }
+  };
+
   const handleRemove = () => {
     Alert.alert('Remove journey?', 'It disappears from the app. You can create a new one at any time.', [
       { text: 'Cancel', style: 'cancel' },
@@ -165,6 +198,30 @@ export default function JourneyOverview({ route, navigation }) {
   }
 
   const isBuild = journey.goal_type === 'build';
+  const eventsSection = (
+    <>
+      <AddEventModal
+        visible={showAddEvent}
+        onClose={() => setShowAddEvent(false)}
+        onSaved={onEventsChanged}
+        defaultDate={parseLocalDate(journey.start_date)}
+      />
+      <View style={styles.sectionRow}>
+        <Text style={styles.sectionLabel}>RACES & EVENTS</Text>
+        <TouchableOpacity onPress={() => setShowAddEvent(true)} style={styles.addLink} accessibilityLabel="Add race or event">
+          <Ionicons name="add" size={16} color={colors.accent} />
+          <Text style={styles.linkText}>Add</Text>
+        </TouchableOpacity>
+      </View>
+      <View style={styles.card}>
+        <EventList
+          events={journeyEvents(journey, events)}
+          onChanged={onEventsChanged}
+          empty="No races or days off in this journey. Add them and your coach plans around them."
+        />
+      </View>
+    </>
+  );
   const header = (
     <View style={styles.navHeader}>
       <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backBtn} accessibilityLabel="Back">
@@ -186,7 +243,7 @@ export default function JourneyOverview({ route, navigation }) {
     return (
       <SafeAreaView style={styles.screen} edges={['top']}>
         {header}
-        <View style={styles.center}>
+        <ScrollView contentContainerStyle={styles.stateScroll}>
           {journey.status === 'scheduled' ? (
             <>
               <Ionicons name="calendar-outline" size={40} color={colors.accent} />
@@ -197,6 +254,7 @@ export default function JourneyOverview({ route, navigation }) {
               <TouchableOpacity style={styles.secondaryBtn} onPress={handleRemove}>
                 <Text style={styles.secondaryText}>Remove journey</Text>
               </TouchableOpacity>
+              <View style={{ alignSelf: 'stretch' }}>{eventsSection}</View>
             </>
           ) : journey.status === 'creating' ? (
             <>
@@ -214,7 +272,8 @@ export default function JourneyOverview({ route, navigation }) {
               </TouchableOpacity>
             </>
           )}
-        </View>
+        </ScrollView>
+        <Toast message={note} onHide={() => setNote(null)} />
       </SafeAreaView>
     );
   }
@@ -230,6 +289,7 @@ export default function JourneyOverview({ route, navigation }) {
 
   const { suggestion, week, checkin, workout, fitness, signals, ftp } = today;
   const sessions = week.sessions.filter((s) => s.state !== 'rest');
+  const counted = sessions.filter((s) => s.state !== 'off'); // sessions on days off drop out
   const openSessions = sessions.filter((s) => s.state === 'open');
   const selected = sessions.find((s) => s.id === selectedId) || null;
   const workoutMatches = workout && workout.chosen_plan_id === selectedId;
@@ -250,6 +310,18 @@ export default function JourneyOverview({ route, navigation }) {
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.accent} />}
       >
         {header}
+
+        {journey.replanning ? (
+          <View style={[styles.banner, { marginTop: 10 }]}>
+            <ActivityIndicator color={colors.warn} size="small" />
+            <Text style={styles.bannerText}>Your coach is adapting the plan from Monday on to your events.</Text>
+          </View>
+        ) : journey.error ? (
+          <TouchableOpacity style={[styles.banner, { marginTop: 10 }]} onPress={handleRetryReplan}>
+            <Ionicons name="refresh" size={16} color={colors.warn} />
+            <Text style={styles.bannerText}>{journey.error}</Text>
+          </TouchableOpacity>
+        ) : null}
 
         {signals.map((s) => (
           <View key={s.kind} style={[styles.banner, { marginTop: 10 }]}>
@@ -287,6 +359,7 @@ export default function JourneyOverview({ route, navigation }) {
             <>
               <Text style={styles.planType}>
                 {today.starts_on ? 'Not started yet'
+                  : suggestion.mode === 'race' ? 'Race day'
                   : suggestion.mode === 'recovery' ? 'Easy recovery spin'
                   : suggestion.mode === 'done' ? 'Done for today' : 'Rest day'}
               </Text>
@@ -326,7 +399,8 @@ export default function JourneyOverview({ route, navigation }) {
         )}
         {checkin && <Text style={styles.tapHint}>Tap to update whenever it changes.</Text>}
 
-        {/* WORKOUT */}
+        {/* WORKOUT (none on race day: the race is the session) */}
+        {suggestion.mode === 'race' && !selected ? null : (<>
         <Text style={styles.sectionLabel}>WORKOUT</Text>
         <View style={styles.card}>
           <Text style={styles.timeLabel}>Time available</Text>
@@ -393,12 +467,14 @@ export default function JourneyOverview({ route, navigation }) {
           )}
         </View>
 
+        </>)}
+
         {/* THIS WEEK */}
         <Text style={styles.sectionLabel}>{today.starts_on ? 'FIRST WEEK' : 'THIS WEEK'}</Text>
         <View style={styles.card}>
           <View style={styles.progressRow}>
             <Text style={styles.hint}>{week.ridden_tss} of {week.planned_tss} TSS</Text>
-            <Text style={styles.hint}>{sessions.filter((s) => s.state === 'done').length}/{sessions.length} sessions</Text>
+            <Text style={styles.hint}>{counted.filter((s) => s.state === 'done').length}/{counted.length} sessions</Text>
           </View>
           <View style={styles.progressTrack}>
             <View style={[styles.progressFill, { width: `${Math.min(100, (100 * week.ridden_tss) / Math.max(1, week.planned_tss))}%` }]} />
@@ -413,7 +489,7 @@ export default function JourneyOverview({ route, navigation }) {
             >
               <Text style={styles.weekDay}>{weekdayName(s.date, 'short')}</Text>
               <View style={[styles.dot, { backgroundColor: TYPE_COLORS[s.planned_workout_type] }]} />
-              <Text style={[styles.weekType, s.state === 'done' && styles.doneText]}>{s.planned_workout_type}</Text>
+              <Text style={[styles.weekType, (s.state === 'done' || s.state === 'off') && styles.doneText]}>{s.planned_workout_type}</Text>
               <Text style={styles.weekMeta}>{s.planned_duration_min} min</Text>
               <SessionMark session={s} selected={s.id === selectedId} />
             </TouchableOpacity>
@@ -422,6 +498,8 @@ export default function JourneyOverview({ route, navigation }) {
             Sessions can move within the week: whatever you ride counts for the session that fits it.
           </Text>
         </View>
+
+        {eventsSection}
 
         {/* FITNESS */}
         <Text style={styles.sectionLabel}>TRAINING LOAD</Text>
@@ -435,8 +513,13 @@ export default function JourneyOverview({ route, navigation }) {
           <Text style={styles.hint}>No rides synced yet. Fitness appears after your first Strava sync.</Text>
         )}
       </ScrollView>
+      <Toast message={note} onHide={() => setNote(null)} />
     </SafeAreaView>
   );
+}
+
+function isBusy(journey) {
+  return journey.status === 'creating' || !!journey.replanning;
 }
 
 function formatDay(iso) {
@@ -481,6 +564,7 @@ function SessionMark({ session, selected }) {
     return <Text style={styles.markDone}>✓{moved ? ` ${weekdayName(session.done_on, 'short')}` : ''}</Text>;
   }
   if (session.state === 'missed') return <Text style={styles.markMissed}>missed</Text>;
+  if (session.state === 'off') return <Text style={styles.markMissed}>time off</Text>;
   return selected ? <Ionicons name="radio-button-on" size={16} color={colors.accent} /> : <Ionicons name="radio-button-off" size={16} color={colors.textFaint} />;
 }
 
@@ -512,9 +596,12 @@ const styles = StyleSheet.create({
   backBtn: { padding: 5 },
   navTitle: { color: colors.text, fontSize: 18, fontWeight: 'bold' },
   navSub: { color: colors.textMuted, fontSize: 12, marginTop: 2 },
+  stateScroll: { flexGrow: 1, justifyContent: 'center', alignItems: 'center', padding: 20, paddingBottom: 50 },
   stateText: { color: colors.text, fontSize: 16, marginTop: 15, textAlign: 'center' },
   stateSub: { color: colors.textMuted, marginTop: 8, textAlign: 'center' },
   sectionLabel: { color: colors.textFaint, fontSize: 12, fontWeight: 'bold', marginBottom: 10, marginTop: 22, letterSpacing: 1 },
+  sectionRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-end' },
+  addLink: { flexDirection: 'row', alignItems: 'center', gap: 2, marginBottom: 10, padding: 2 },
   hint: { color: colors.textMuted, fontSize: 14, lineHeight: 20 },
   row: { flexDirection: 'row', gap: 12 },
   tile: { flex: 1, backgroundColor: colors.card, padding: 14, borderRadius: 10, alignItems: 'center' },

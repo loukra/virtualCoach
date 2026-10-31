@@ -5,15 +5,57 @@ from datetime import date, timedelta
 from stravalib import exc as strava_exc
 
 from core import db
-from core.dates import today
+from core.dates import monday_of, today
 from logic.ai import GenerationError
 from logic.ai_planner import build_plan
+from logic.events import load_events
 from logic.metrics import calculate_daily_metrics
+from logic.schemas import PlanDay
 from logic.sessions import match_athlete_rides
 from logic.strava_auth import exchange_code_for_token
 from logic.strava_sync import backfill_missing_activities
 
 log = logging.getLogger(__name__)
+
+
+def latest_race_before(athlete_id: int, journey_id: str, start_date: date) -> date | None:
+    """A race in the four days before a plan starts (the end of a race journey, or a race event)."""
+    window = [(start_date - timedelta(days=4)).isoformat(), (start_date - timedelta(days=1)).isoformat()]
+    row = db.query_one(
+        "SELECT MAX(d) AS d FROM ("
+        " SELECT race_date AS d FROM journeys WHERE athlete_id = ? AND id != ? AND goal_type = 'race'"
+        "  AND status != 'archived' AND race_date BETWEEN ? AND ?"
+        " UNION ALL SELECT start_date FROM events WHERE athlete_id = ? AND kind = 'race'"
+        "  AND start_date BETWEEN ? AND ?)",
+        [athlete_id, journey_id, *window, athlete_id, *window],
+    )
+    return date.fromisoformat(row["d"]) if row["d"] else None
+
+
+def longest_ride_min(athlete_id: int, current_date: date) -> int | None:
+    row = db.query_one(
+        "SELECT MAX(moving_time) AS s FROM activities WHERE athlete_id = ? AND start_date_local >= ?",
+        [athlete_id, (current_date - timedelta(days=90)).isoformat()],
+    )
+    return round(row["s"] / 60) if row and row["s"] else None
+
+
+def plan_rows(journey_id: str, start_date: date, days: list[PlanDay]) -> list[tuple]:
+    return [
+        (
+            journey_id,
+            (start_date + timedelta(days=d.day_number - 1)).isoformat(),
+            d.day_number, d.phase, d.planned_workout_type, d.planned_duration_min,
+            d.planned_tss, d.description,
+        )
+        for d in days
+    ]
+
+
+INSERT_PLAN = (
+    "INSERT INTO master_plan (journey_id, date, day_number, phase, planned_workout_type,"
+    " planned_duration_min, planned_tss, description) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+)
 
 
 def run_ai_plan_generation(
@@ -29,39 +71,18 @@ def run_ai_plan_generation(
     goal_type: str = "race",
 ) -> None:
     try:
-        # A plan that starts right after a race (the end of the journey before) opens easy.
-        previous_race = db.query_one(
-            "SELECT MAX(race_date) AS d FROM journeys WHERE athlete_id = ? AND id != ? AND goal_type = 'race'"
-            " AND status != 'archived' AND race_date BETWEEN ? AND ?",
-            [athlete_id, journey_id, (start_date - timedelta(days=4)).isoformat(),
-             (start_date - timedelta(days=1)).isoformat()],
-        )
-        longest = db.query_one(
-            "SELECT MAX(moving_time) AS s FROM activities WHERE athlete_id = ? AND start_date_local >= ?",
-            [athlete_id, (current_date - timedelta(days=90)).isoformat()],
-        )
         days = build_plan(
             athlete_id=athlete_id, journey_id=journey_id, goal=goal, start_date=start_date,
             race_date=race_date, current_date=current_date, ftp_watts=ftp, weight=weight,
             current_ctl=current_ctl, goal_type=goal_type,
-            after_race=date.fromisoformat(previous_race["d"]) if previous_race["d"] else None,
-            longest_ride_min=round(longest["s"] / 60) if longest and longest["s"] else None,
+            # A plan that starts right after a race opens easy.
+            after_race=latest_race_before(athlete_id, journey_id, start_date),
+            longest_ride_min=longest_ride_min(athlete_id, current_date),
+            events=load_events(athlete_id, start_date, race_date),
         )
-        rows = [
-            (
-                journey_id,
-                (start_date + timedelta(days=d.day_number - 1)).isoformat(),
-                d.day_number, d.phase, d.planned_workout_type, d.planned_duration_min,
-                d.planned_tss, d.description,
-            )
-            for d in days
-        ]
+        rows = plan_rows(journey_id, start_date, days)
         with db.transaction() as conn:  # the plan appears complete or not at all
-            conn.executemany(
-                "INSERT INTO master_plan (journey_id, date, day_number, phase, planned_workout_type,"
-                " planned_duration_min, planned_tss, description) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                rows,
-            )
+            conn.executemany(INSERT_PLAN, rows)
             conn.execute("UPDATE journeys SET status = 'active', error = NULL WHERE id = ?", [journey_id])
         log.info("Plan with %d days saved for journey %s", len(rows), journey_id)
     except GenerationError as e:
@@ -70,6 +91,75 @@ def run_ai_plan_generation(
     except Exception:
         log.exception("Plan generation crashed for journey %s", journey_id)
         _fail_journey(journey_id, "Plan generation failed unexpectedly.")
+    replan_if_pending(journey_id)
+
+
+def replan_from(day: date) -> date:
+    """Plans change from the coming Monday: the current week stays as the athlete knows it."""
+    return monday_of(day) + timedelta(days=7)
+
+
+def request_replan(journey_id: str) -> str:
+    """Marks an active journey for a rebuild after its events changed. Returns 'replanning' when
+    the caller should run replan_journey now, 'queued' when a running generation picks it up."""
+    if db.execute(
+        "UPDATE journeys SET replanning = 1, replan_pending = 0, error = NULL"
+        " WHERE id = ? AND status = 'active' AND replanning = 0",
+        [journey_id],
+    ):
+        return "replanning"
+    db.execute("UPDATE journeys SET replan_pending = 1 WHERE id = ? AND status IN ('creating', 'active')",
+               [journey_id])
+    return "queued"
+
+
+def replan_if_pending(journey_id: str) -> None:
+    row = db.query_one("SELECT replan_pending FROM journeys WHERE id = ?", [journey_id])
+    if row and row["replan_pending"] and request_replan(journey_id) == "replanning":
+        replan_journey(journey_id)
+
+
+def replan_journey(journey_id: str) -> None:
+    """Rebuilds an active plan from next Monday on, around the athlete's current events. The weeks
+    before stay; the old plan stays in use until the new one is saved."""
+    journey = db.query_one("SELECT * FROM journeys WHERE id = ?", [journey_id])
+    start, end = date.fromisoformat(journey["start_date"]), date.fromisoformat(journey["race_date"])
+    athlete_id = journey["athlete_id"]
+    first = max(replan_from(today()), monday_of(start) + timedelta(days=7))
+    try:
+        if first <= end:
+            kept = [
+                PlanDay(**row) for row in db.query(
+                    "SELECT day_number, phase, planned_workout_type, planned_duration_min, planned_tss,"
+                    " COALESCE(description, '') AS description FROM master_plan"
+                    " WHERE journey_id = ? AND date < ? ORDER BY date",
+                    [journey_id, first.isoformat()],
+                )
+            ]
+            profile = db.query_one("SELECT ftp, weight_kg FROM athletes WHERE id = ?", [athlete_id]) or {}
+            latest = db.query_one(
+                "SELECT ctl FROM daily_metrics WHERE athlete_id = ? ORDER BY date DESC LIMIT 1", [athlete_id]
+            )
+            days = build_plan(
+                athlete_id=athlete_id, journey_id=journey_id, goal=journey["name"], start_date=start,
+                race_date=end, current_date=today(), ftp_watts=profile.get("ftp") or 200,
+                weight=profile.get("weight_kg") or 75, current_ctl=float(latest["ctl"]) if latest else 0.0,
+                goal_type=journey["goal_type"], longest_ride_min=longest_ride_min(athlete_id, today()),
+                events=load_events(athlete_id, start, end), kept_days=kept,
+            )
+            with db.transaction() as conn:
+                conn.execute("DELETE FROM master_plan WHERE journey_id = ? AND date >= ?",
+                             [journey_id, first.isoformat()])
+                conn.executemany(INSERT_PLAN, plan_rows(journey_id, start, days))
+            log.info("Plan of journey %s rebuilt from %s", journey_id, first)
+        db.execute("UPDATE journeys SET replanning = 0 WHERE id = ?", [journey_id])
+    except Exception as e:
+        log.error("Replanning failed for journey %s: %s", journey_id, getattr(e, "errors", e))
+        db.execute(
+            "UPDATE journeys SET replanning = 0, error = ? WHERE id = ?",
+            ["The plan could not be adapted to your events; the previous plan stays. Try again.", journey_id],
+        )
+    replan_if_pending(journey_id)
 
 
 def claim_due_journeys(athlete_id: int, day: date) -> list[dict]:

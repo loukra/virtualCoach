@@ -51,3 +51,14 @@ class ConnectRequest(BaseModel):
 
 class SyncRequest(BaseModel):
     days_back: int = Field(default=7, ge=1, le=365)
+
+
+class CreateEventRequest(BaseModel):
+    # race: priority A (main, tapered for) or B (secondary). ride: a group ride or sportive at
+    # endurance pace. off: days without training, start_date to end_date.
+    kind: Literal["race", "ride", "off"]
+    name: str = Field(min_length=1, max_length=100)
+    start_date: date
+    end_date: date | None = None
+    priority: Literal["A", "B"] | None = None
+    duration_min: int | None = Field(default=None, ge=20, le=720)

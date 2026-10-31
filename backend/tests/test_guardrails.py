@@ -111,7 +111,7 @@ def test_impossible_tss_and_inconsistent_rest_day_fail():
 def test_last_day_must_be_the_race():
     days = week_of_days(1, GOOD_WEEK)
     errors = validate_days(days, 1, 7, total_days=7, week_targets={})
-    assert "Day 7 is race day: planned_workout_type must be Race." in errors
+    assert "Day 7 is race day (\"the race\"): planned_workout_type must be Race." in errors
 
 
 def test_token_load_for_a_long_day_or_race_is_rejected():
@@ -152,4 +152,4 @@ def test_days_after_a_race_stay_easy():
     days = week_of_days(1, [0, 50, 60, 70, 0, 90, 50])
     days[1].planned_workout_type = "Threshold"
     errors = validate_days(days, 1, 7, 28, {}, "build", (), 0, easy_days=3)
-    assert errors == ["Day 2 follows the race: make it Rest, Recovery or Endurance."]
+    assert errors == ["Day 2 is next to the race just before this plan: make it Rest, Recovery or Endurance."]

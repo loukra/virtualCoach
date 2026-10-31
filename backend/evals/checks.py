@@ -6,6 +6,7 @@ miss is a signal to look at the prompt, not a reason to reject a workout in the 
 Each function returns a list of problems in plain language; an empty list means it passed.
 """
 from core.dates import plan_week
+from logic.events import PlanEvents
 from logic.guardrails import RECOVERY_MAX_POWER, build_peak_tss
 from logic.schemas import PlanDay, Workout
 from logic.workout_math import estimate_tss, step_segments
@@ -76,7 +77,7 @@ def workout_checks(
 
 def plan_checks(
     days: list[PlanDay], current_ctl: float, goal_type: str = "race", test_days: list[int] = (),
-    offset: int = 0,
+    offset: int = 0, events: PlanEvents | None = None,
 ) -> list[str]:
     """Shape of a whole plan: sensible start, a build, not too many hard days; a race plan
     tapers, a fitness plan keeps its FTP tests and enough quality work to raise FTP."""
@@ -104,7 +105,7 @@ def plan_checks(
         if hard > 3:
             problems.append(f"week {number} has {hard} hard days")
     if goal_type == "build":
-        return problems + build_checks(full_weeks, current_ctl)
+        return problems + build_checks(full_weeks, current_ctl, events)
 
     race_week = sum(d.planned_tss for d in days[-8:-1])  # the seven days before race day
     if race_week > 0.75 * max(weekly_tss):
@@ -123,15 +124,20 @@ def plan_checks(
     return problems
 
 
-def build_checks(full_weeks: list[list[PlanDay]], current_ctl: float) -> list[str]:
-    """A fitness block without a race: FTP only rises with regular quality work and growing load."""
+def build_checks(
+    full_weeks: list[list[PlanDay]], current_ctl: float, events: PlanEvents | None = None
+) -> list[str]:
+    """A fitness block: FTP only rises with regular quality work and growing load. Races come only
+    from the athlete's events; a main race inside the block sets its own peak, so the load check
+    is left to the guardrails then."""
+    ev = events or PlanEvents()
     problems = []
     weekly = [sum(d.planned_tss for d in w) for w in full_weeks]
     least = build_peak_tss(current_ctl, len(full_weeks), 0.8)
-    if len(weekly) >= 8 and max(weekly) < least:
+    if len(weekly) >= 8 and max(weekly) < least and not ev.main_race_weeks:
         problems.append(f"peak week {max(weekly)} TSS, fitness only grows from about {least}")
-    if any(d.planned_workout_type == "Race" for w in full_weeks for d in w):
-        problems.append("a fitness plan contains a Race day")
+    if any(d.planned_workout_type == "Race" and d.day_number not in ev.races for w in full_weeks for d in w):
+        problems.append("a fitness plan contains a Race day outside the athlete's races")
     build_weeks = [w for w in full_weeks if sum(d.phase == "Build" for d in w) >= 4]
     thin = [w for w in build_weeks if sum(d.planned_workout_type in HARD_TYPES for d in w) < 2]
     if build_weeks and len(thin) > len(build_weeks) / 2:
