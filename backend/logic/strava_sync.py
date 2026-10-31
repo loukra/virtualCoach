@@ -38,7 +38,8 @@ def calculate_normalized_power(watts_stream) -> int:
     if watts_stream is None or len(watts_stream) < 30:
         return 0
     rolling_avg = np.convolve(watts_stream, np.ones(30) / 30, mode="valid")
-    return int(np.power(np.mean(np.power(rolling_avg, 4)), 0.25))
+    # round, not int(): float error turns 200 W into 199.999... on some platforms
+    return round(float(np.power(np.mean(np.power(rolling_avg, 4)), 0.25)))
 
 
 def calculate_efficiency_factor(np_val, avg_hr) -> float:
@@ -70,7 +71,7 @@ def ride_tss(moving_time_sec, np_val, ftp, avg_hr, max_hr) -> tuple[int, str]:
         return calculate_tss_from_stream(moving_time_sec, np_val, ftp), "power"
     if avg_hr > 0:
         return calculate_hr_tss(moving_time_sec, avg_hr, max_hr), "heart_rate"
-    return int(moving_time_sec / 3600 * TIME_ONLY_TSS_PER_HOUR), "time"
+    return round(moving_time_sec / 3600 * TIME_ONLY_TSS_PER_HOUR), "time"
 
 
 def get_ftp_for_date(activity_date_str, history_list, default_ftp):
