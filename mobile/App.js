@@ -72,7 +72,7 @@ function Root() {
 
   // 3. Connect Strava
   if (!me.strava_connected) {
-    return <ConnectStrava failed={me.sync_status === 'failed'} onSyncStarted={refresh} />;
+    return <ConnectStrava failed={me.sync_status === 'failed'} error={me.sync_error} onSyncStarted={refresh} />;
   }
 
   return (

@@ -14,7 +14,7 @@ router = APIRouter()
 def me(athlete_id: int = Depends(current_athlete)):
     """Profile plus the onboarding state the app routes on."""
     row = db.query_one(
-        "SELECT name, goal, ftp, weight_kg, max_heart_rate, strava_connected, sync_status"
+        "SELECT name, goal, ftp, weight_kg, max_heart_rate, strava_connected, sync_status, sync_error"
         " FROM athletes WHERE id = ?",
         [athlete_id],
     )

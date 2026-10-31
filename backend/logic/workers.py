@@ -2,6 +2,8 @@
 import logging
 from datetime import date, timedelta
 
+from stravalib import exc as strava_exc
+
 from core import db
 from logic.ai import GenerationError
 from logic.ai_planner import build_plan
@@ -58,8 +60,22 @@ def _fail_journey(journey_id: str, message: str) -> None:
     db.execute("UPDATE journeys SET status = 'failed', error = ? WHERE id = ?", [message, journey_id])
 
 
-def _set_sync_status(athlete_id: int, status: str) -> None:
-    db.execute("UPDATE athletes SET sync_status = ? WHERE id = ?", [status, athlete_id])
+def _set_sync_status(athlete_id: int, status: str, error: str | None = None) -> None:
+    db.execute(
+        "UPDATE athletes SET sync_status = ?, sync_error = ? WHERE id = ?", [status, error, athlete_id]
+    )
+
+
+def sync_error_message(e: Exception) -> str:
+    """What the athlete should know and do; the details stay in the server log."""
+    if isinstance(e, strava_exc.ApplicationInactive):
+        return ("Strava has deactivated the API app: its owner needs a Strava subscription."
+                " Reactivate the app at strava.com/settings/api, then try again.")
+    if isinstance(e, strava_exc.AccessUnauthorized | strava_exc.AuthError):
+        return "Strava no longer accepts the connection. Please connect Strava again."
+    if isinstance(e, strava_exc.RateLimitExceeded | strava_exc.RateLimitTimeout):
+        return "Strava's request limit is reached. Try again in 15 minutes."
+    return "The Strava import failed. Try again later."
 
 
 def run_onboarding_process(athlete_id: int, code: str) -> None:
@@ -67,18 +83,21 @@ def run_onboarding_process(athlete_id: int, code: str) -> None:
     _set_sync_status(athlete_id, "syncing")
     try:
         if not exchange_code_for_token(athlete_id, code):
-            raise RuntimeError("Strava token exchange failed")
+            raise strava_exc.AuthError("Strava token exchange failed")
         backfill_missing_activities(athlete_id, days_back=90)
         calculate_daily_metrics(athlete_id)
         _set_sync_status(athlete_id, "completed")
-    except Exception:
+    except Exception as e:
         log.exception("Onboarding failed for athlete %s", athlete_id)
-        _set_sync_status(athlete_id, "failed")
+        _set_sync_status(athlete_id, "failed", sync_error_message(e))
 
 
 def run_sync(athlete_id: int, days_back: int = 7) -> None:
     try:
-        if backfill_missing_activities(athlete_id, days_back) is not None:
-            calculate_daily_metrics(athlete_id)
-    except Exception:
+        if backfill_missing_activities(athlete_id, days_back) is None:
+            return  # another sync is running and will report the outcome
+        calculate_daily_metrics(athlete_id)
+        _set_sync_status(athlete_id, "completed")
+    except Exception as e:
         log.exception("Sync failed for athlete %s", athlete_id)
+        _set_sync_status(athlete_id, "failed", sync_error_message(e))

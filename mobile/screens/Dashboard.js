@@ -13,12 +13,14 @@ import { APP_NAME } from '../theme';
 import { apiGet, apiPost } from '../lib/api';
 import CreateJourneyModal from '../components/CreateJourneyModal';
 import { useJourney } from '../context/JourneyContext';
+import { useSessionContext } from '../context/SessionContext';
 // 👇 IMPORT NAVIGATION HOOK
 import { useNavigation, useFocusEffect } from '@react-navigation/native';
 
 export default function Dashboard() {
   const navigation = useNavigation();
   const { setActiveJourneyId } = useJourney();
+  const { me, refresh } = useSessionContext();
   const [journeys, setJourneys] = useState([]);
   const [isSyncing, setIsSyncing] = useState(false);
   const [createModalVisible, setCreateModalVisible] = useState(false);
@@ -57,8 +59,9 @@ export default function Dashboard() {
     }
     catch (e) {
         console.log(e);
-    } finally { 
-        setTimeout(() => setIsSyncing(false), 3000); 
+    } finally {
+        // The import runs in the background; read its outcome (and any error) a moment later.
+        setTimeout(() => { setIsSyncing(false); refresh(); }, 4000);
     }
   };
 
@@ -85,6 +88,19 @@ export default function Dashboard() {
             <Text style={{color:'#fff', fontWeight:'bold', fontSize: 16}}>My Journeys</Text>
         </View>
       </View>
+
+      {me?.sync_status === 'failed' && (
+        <View style={styles.syncError}>
+          <Ionicons name="warning-outline" size={20} color="#ffb84d" />
+          <View style={{ flex: 1 }}>
+            <Text style={styles.syncErrorTitle}>Strava rides could not be imported</Text>
+            <Text style={styles.syncErrorText}>{me.sync_error || 'Try again later.'}</Text>
+          </View>
+          <TouchableOpacity onPress={triggerApiSync} disabled={isSyncing} style={styles.syncRetry}>
+            {isSyncing ? <ActivityIndicator color="#ffb84d" size="small" /> : <Text style={styles.syncRetryText}>Retry</Text>}
+          </TouchableOpacity>
+        </View>
+      )}
 
       {/* --- CONTENT AREA --- */}
       <View style={styles.content}>
@@ -136,6 +152,11 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#111' },
   header: { flexDirection: 'row', justifyContent: 'space-between', alignItems:'center', padding: 20, borderBottomWidth: 1, borderBottomColor: '#222' },
   content: { flex: 1 },
+  syncError: { flexDirection: 'row', gap: 10, alignItems: 'center', backgroundColor: '#2a2210', margin: 20, marginBottom: 0, padding: 14, borderRadius: 12 },
+  syncErrorTitle: { color: '#ffb84d', fontWeight: 'bold', marginBottom: 2 },
+  syncErrorText: { color: '#d9c49a', fontSize: 13, lineHeight: 18 },
+  syncRetry: { paddingVertical: 8, paddingHorizontal: 12, borderRadius: 8, borderWidth: 1, borderColor: '#ffb84d' },
+  syncRetryText: { color: '#ffb84d', fontWeight: 'bold' },
   
   // List Card Styles
   card: { backgroundColor: '#1a1a1a', padding: 20, borderRadius: 12, flexDirection:'row', justifyContent:'space-between', alignItems:'center' },

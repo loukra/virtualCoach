@@ -55,8 +55,9 @@ def format_compliance_history(plans: list[dict], activities: list[dict], day: da
 
 
 def get_todays_context(athlete_id: int, journey: dict) -> dict:
-    day = today().isoformat()
-    week_ago = (today() - timedelta(days=7)).isoformat()
+    current = today()
+    day = current.isoformat()
+    week_ago = (current - timedelta(days=7)).isoformat()
 
     profile = db.query_one("SELECT ftp, max_heart_rate FROM athletes WHERE id = ?", [athlete_id]) or {}
     stats = db.query_one(
@@ -93,7 +94,7 @@ def get_todays_context(athlete_id: int, journey: dict) -> dict:
         "days_until_race": (race - today()).days,
         "current_week": (today() - start).days // 7 + 1,
         "total_weeks": (race - start).days // 7 + 1,
-        "compliance": format_compliance_history(recent_plans, recent_rides, day),
+        "compliance": format_compliance_history(recent_plans, recent_rides, current),
     }
 
 

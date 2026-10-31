@@ -1,4 +1,6 @@
 """API tests against a real (temporary) SQLite database; only the LLM and Strava are faked."""
+from datetime import timedelta
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -134,3 +136,31 @@ def test_workout_needs_an_active_plan(client, athletes, no_background_plan):
     journey_id = create_journey(client, athletes["louis"])
     res = client.post("/generate-workout", headers=athletes["louis"], json={"journey_id": journey_id})
     assert res.status_code == 409
+
+
+def test_workout_generation_runs_end_to_end_with_a_fake_model(
+    client, athletes, no_background_plan, monkeypatch
+):
+    """Everything real except the model: context from the database, guardrails, storage, .zwo."""
+    import logic.ai as ai
+    from tests.test_ai import FakeResponses
+
+    journey_id = create_journey(client, athletes["louis"])
+    day = today()
+    db.execute("UPDATE journeys SET status = 'active', start_date = ? WHERE id = ?",
+               [(day - timedelta(days=3)).isoformat(), journey_id])
+    db.execute(
+        "INSERT INTO master_plan (journey_id, date, day_number, phase, planned_workout_type,"
+        " planned_duration_min, planned_tss, description)"
+        " VALUES (?, ?, 4, 'Base', 'Sweet Spot', 60, 60, 'SS.')",
+        [journey_id, day.isoformat()],
+    )
+    responses = FakeResponses([sweet_spot_workout()])
+    monkeypatch.setattr(ai, "get_openai", lambda: type("Client", (), {"responses": responses})())
+
+    res = client.post("/generate-workout", headers=athletes["louis"],
+                      json={"journey_id": journey_id, "available_time": 60})
+    assert res.status_code == 200, res.text
+    assert "LAST SEVEN DAYS" in responses.calls[0]["input"][0]["content"]
+    zwo = client.get(f"/workouts/{journey_id}/{day.isoformat()}.zwo", headers=athletes["louis"])
+    assert zwo.status_code == 200

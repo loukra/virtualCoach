@@ -11,11 +11,11 @@ const REDIRECT_URI = Linking.createURL('strava');
 // Random value echoed back by Strava, so the app only accepts a code from its own request.
 const newOAuthState = () => Math.random().toString(36).slice(2) + Date.now().toString(36);
 
-export default function ConnectStrava({ failed, onSyncStarted }) {
+export default function ConnectStrava({ failed, error, onSyncStarted }) {
   const [loading, setLoading] = useState(false);
   const [statusText, setStatusText] = useState(
     failed
-      ? "The last import did not work. Please connect again."
+      ? error || "The last import did not work. Please connect again."
       : "Connect your account to analyze your history."
   );
 

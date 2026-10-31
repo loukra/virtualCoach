@@ -1,4 +1,5 @@
 import logging
+import os
 import time
 
 from stravalib.client import Client
@@ -7,6 +8,8 @@ from core import db
 from core.config import get_settings
 
 log = logging.getLogger(__name__)
+# stravalib warns that it cannot refresh tokens itself; this module refreshes them (get_valid_token).
+os.environ.setdefault("SILENCE_TOKEN_WARNINGS", "true")
 
 
 def exchange_code_for_token(athlete_id: int, code: str) -> bool:
