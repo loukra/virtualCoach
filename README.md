@@ -36,7 +36,12 @@ The model never produces anything the app uses unchecked.
 7. **Observability.** Every attempt lands in `ai_generations`: model, prompt version (file name
    plus content hash), tokens, latency, violations.
 8. **Evals** (`backend/evals`). Fixed athlete scenarios, including a prompt-injection attempt,
-   run against the real model; the report shows pass rate and first-answer validity.
+   run against the real model. Beyond the guardrails they check coaching intent
+   (`evals/checks.py`): does the main set match the planned session type, is the load right for
+   the plan and the available time, does a 10-week plan start near current fitness, build and
+   taper? Optionally a second model grades plan fit, safety and clarity (`--judge`; only in the
+   evals, never in the app). `--runs N` repeats each scenario because answers vary; every run
+   saves a JSON report with models and prompt versions and prints the change to the previous one.
 
 Data minimization: ride names are not sent to the model, responses are not stored at OpenAI
 (`store=False`), and the athlete's free text is passed as quoted data.
@@ -90,7 +95,8 @@ Sign in with the token, fill in the profile, connect Strava, then create a journ
 cd backend
 .venv/bin/ruff check . && .venv/bin/pytest -q     # offline, no API keys needed
 .venv/bin/python -m evals.run_evals               # real model, needs OPENAI_API_KEY, a few cents
-.venv/bin/python -m evals.run_evals --plan        # plus a 10-week plan
+.venv/bin/python -m evals.run_evals --runs 3      # each scenario three times, with pass rates
+.venv/bin/python -m evals.run_evals --plan --judge   # plus a 10-week plan and a judge model
 ```
 
 CI runs lint and tests on every push and checks that the app bundles (catching import casing

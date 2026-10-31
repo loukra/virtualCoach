@@ -18,8 +18,11 @@ class Settings(BaseSettings):
     # "Today" for check-ins, workouts and plan dates is computed in this timezone.
     timezone: str = "Europe/Berlin"
 
-    plan_model: str = "gpt-5-mini"
-    workout_model: str = "gpt-5-mini"
+    plan_model: str = "gpt-6-luna"
+    workout_model: str = "gpt-6-luna"
+    # Only for `evals.run_evals --judge`. A different, stronger model gives a more independent
+    # opinion than the coach grading itself.
+    judge_model: str = "gpt-6-luna"
     openai_timeout_s: float = 120
     # One generation may try this often: the first answer plus repairs after failed checks.
     ai_max_attempts: int = 3
