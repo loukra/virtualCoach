@@ -80,7 +80,7 @@ def test_scores_are_validated(client, athletes):
 
 def test_journeys_are_private_per_athlete(client, athletes, no_background_plan):
     journey_id = create_journey(client, athletes["louis"])
-    assert len(no_background_plan) == 1
+    assert no_background_plan == []  # starts in the future: no plan yet
 
     assert [j["id"] for j in client.get("/journeys", headers=athletes["louis"]).json()] == [journey_id]
     assert client.get("/journeys", headers=athletes["anna"]).json() == []
@@ -175,7 +175,7 @@ def test_build_journey_runs_for_the_chosen_weeks(client, athletes, no_background
     assert res.status_code == 200, res.text
     journey = client.get(f"/journeys/{res.json()['journey_id']}", headers=athletes["louis"]).json()
     assert journey["goal_type"] == "build" and journey["race_date"] == "2100-02-21"  # 16 × 7 days
-    assert no_background_plan[0][-1] == "build"
+    assert journey["status"] == "scheduled"
     missing = client.post("/create-journey", headers=athletes["louis"], json={
         "journey_name": "Winter", "goal_type": "build", "current_ftp": 250, "current_weight": 75,
     })
@@ -262,3 +262,40 @@ def test_today_before_the_plan_starts(client, athletes, no_background_plan):
     view = client.get(f"/journeys/{journey_id}/today", headers=athletes["louis"]).json()
     assert view["starts_on"] == (today() + timedelta(days=2)).isoformat()
     assert view["suggestion"]["mode"] == "rest" and "Your plan starts on" in view["suggestion"]["reason"]
+
+
+def test_a_journey_starting_today_gets_its_plan_now(client, athletes, no_background_plan):
+    res = client.post("/create-journey", headers=athletes["louis"], json={
+        "journey_name": "Winter", "goal_type": "build", "weeks": 8, "current_ftp": 250, "current_weight": 75,
+    })
+    assert res.json()["status"] == "processing"
+    assert no_background_plan[0][-1] == "build"
+
+
+def test_journeys_may_not_overlap(client, athletes, no_background_plan):
+    create_journey(client, athletes["louis"])  # 2099-03-01 to 2099-06-01
+    body = {"journey_name": "Second", "race_date": "2099-07-01", "current_ftp": 250, "current_weight": 75}
+    res = client.post("/create-journey", headers=athletes["louis"], json={**body, "start_date": "2099-05-15"})
+    assert res.status_code == 409 and "Gran Fondo" in res.json()["detail"]
+    res = client.post("/create-journey", headers=athletes["louis"], json={**body, "start_date": "2099-06-02"})
+    assert res.status_code == 200
+    names = [j["name"] for j in client.get("/journeys", headers=athletes["louis"]).json()]
+    assert names == ["Gran Fondo", "Second"]  # in time order
+    # Anna's plans are her own business.
+    assert client.post("/create-journey", headers=athletes["anna"],
+                       json={**body, "start_date": "2099-05-15"}).status_code == 200
+
+
+def test_scheduled_journey_gets_its_plan_on_its_start_day(client, athletes, no_background_plan, monkeypatch):
+    journey_id = create_journey(client, athletes["louis"])
+    started = []
+    monkeypatch.setattr(routers.journeys, "generate_scheduled_plan", started.append)
+    assert client.get("/journeys", headers=athletes["louis"]).json()[0]["status"] == "scheduled"
+    assert started == []
+
+    from datetime import date
+    monkeypatch.setattr(routers.journeys, "today", lambda: date(2099, 3, 1))
+    assert client.get("/journeys", headers=athletes["louis"]).json()[0]["status"] == "creating"
+    assert [j["id"] for j in started] == [journey_id]
+    client.get(f"/journeys/{journey_id}", headers=athletes["louis"])
+    assert len(started) == 1  # claimed once

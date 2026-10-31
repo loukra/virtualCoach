@@ -146,3 +146,10 @@ def test_returning_to_build_load_after_a_recovery_week_is_no_jump():
 
     assert not jumps([400, 440, 470, 280, 470, 250])
     assert jumps([400, 440, 470, 280, 700, 250])
+
+
+def test_days_after_a_race_stay_easy():
+    days = week_of_days(1, [0, 50, 60, 70, 0, 90, 50])
+    days[1].planned_workout_type = "Threshold"
+    errors = validate_days(days, 1, 7, 28, {}, "build", (), 0, easy_days=3)
+    assert errors == ["Day 2 follows the race: make it Rest, Recovery or Endurance."]

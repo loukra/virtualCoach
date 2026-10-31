@@ -6,7 +6,7 @@ import {
 } from 'react-native';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import { apiGet, apiPost } from '../lib/api';
-import { localDateString } from '../lib/dates';
+import { localDateString, parseLocalDate } from '../lib/dates';
 import { parseNumber, LIMITS, rangeMessage } from '../lib/numbers';
 
 const DEFAULT_PLAN_WEEKS = 12;
@@ -42,6 +42,16 @@ export default function CreateJourneyModal({ visible, onClose, onJourneyCreated 
 
   const fetchStats = async () => {
     try {
+        // Journeys follow each other: a new one starts after the last one ends, at the earliest today.
+        const journeys = await apiGet('/journeys');
+        const lastEnd = journeys.map((j) => j.race_date).sort().pop();
+        const dayAfter = lastEnd ? parseLocalDate(lastEnd) : null;
+        if (dayAfter) dayAfter.setDate(dayAfter.getDate() + 1);
+        const start = dayAfter && dayAfter > new Date() ? dayAfter : new Date();
+        setStartDate(start);
+        const race = new Date(start);
+        race.setDate(race.getDate() + DEFAULT_PLAN_WEEKS * 7);
+        setRaceDate(race);
         const me = await apiGet('/me');
         setFtp(me.ftp ? me.ftp.toString() : '200');
         setWeight(me.weight_kg ? me.weight_kg.toString() : '75');
@@ -63,7 +73,7 @@ export default function CreateJourneyModal({ visible, onClose, onJourneyCreated 
 
     setLoading(true);
     try {
-        await apiPost('/create-journey', {
+        const created = await apiPost('/create-journey', {
             journey_name: title,
             goal_type: goalType,
             ...(isRace ? { race_date: localDateString(raceDate) } : { weeks }),
@@ -71,7 +81,11 @@ export default function CreateJourneyModal({ visible, onClose, onJourneyCreated 
             current_ftp: ftpValue,
             current_weight: weightValue
         });
-        Alert.alert("Plan on the way", "Your coach is building the plan. This takes a minute or two.");
+        if (created.status === 'scheduled') {
+          Alert.alert("Journey scheduled", `Your coach builds the plan on ${startDate.toDateString()}, from your fitness then.`);
+        } else {
+          Alert.alert("Plan on the way", "Your coach is building the plan. This takes a minute or two.");
+        }
         onJourneyCreated();
         onClose();
     } catch (e) {

@@ -11,6 +11,12 @@ partner), run on my own server.
 
 - **Two goals.** *Race*: base, build, peak, taper to an event date. *Build fitness*: N weeks of
   progressive load with recovery weeks and no race.
+- **Journeys follow each other.** Several journeys are fine (a winter block, then a race), but
+  they never overlap, so every ride belongs to one plan. A journey that starts later is
+  *scheduled*: its plan is generated on its start day (after the app's Strava sync), from the
+  fitness and FTP of that day. A plan that starts right after a race opens with easy days.
+- **Calendar weeks.** Plan weeks run Monday to Sunday; a plan started mid-week has a short
+  first week.
 - **Flexible weeks** (`logic/sessions.py`). A plan week is a set of sessions, each with a
   suggested day. Whatever you ride completes the open session of that week that fits it best
   (a hard ride the quality session, a long ride the long ride, an easy one the easy day), on any
@@ -146,7 +152,7 @@ the athlete is taken from the token, request bodies never carry an id.
 | POST | `/connect-strava` | OAuth code from the app; token exchange and 90-day import in the background |
 | POST | `/sync` | import new rides, recompute CTL/ATL/TSB |
 | POST | `/check-in` | energy, legs, motivation, note (again later the same day replaces it) |
-| POST | `/create-journey` | `goal_type` race (with `race_date`) or build (with `weeks`); plan generated in the background |
+| POST | `/create-journey` | `goal_type` race (with `race_date`) or build (with `weeks`); may not overlap another journey; plan generated now, or on the start day for a later start |
 | POST | `/generate-workout` | today's workout for `plan_id` (default: the suggested session); cached per day, session and duration; `force` regenerates |
 | GET | `/workouts/{journey_id}/{date}.zwo` | that day's workout as a Zwift file, named after the workout |
 

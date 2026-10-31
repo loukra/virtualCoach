@@ -8,7 +8,7 @@ from core import db
 from core.auth import current_athlete
 from core.dates import end_after_weeks, today
 from logic import ftp, sessions
-from logic.workers import run_ai_plan_generation
+from logic.workers import claim_due_journeys, generate_scheduled_plan, run_ai_plan_generation
 from models import CreateJourneyRequest
 
 router = APIRouter()
@@ -30,7 +30,8 @@ def create_journey_endpoint(
     background_tasks: BackgroundTasks,
     athlete_id: int = Depends(current_athlete),
 ):
-    """Creates a journey and generates its plan in the background (status creating -> active)."""
+    """Creates a journey. One starting today gets its plan now (creating -> active); a later one
+    is 'scheduled' and gets its plan on its start day, from the fitness of that day."""
     day = today()
     start_date = payload.start_date or day
     if payload.goal_type == "build":
@@ -48,6 +49,18 @@ def create_journey_endpoint(
         raise HTTPException(400, "Plans can cover at most one year.")
     if end_date < day:
         raise HTTPException(400, "Race date is in the past.")
+    # Journeys follow each other: a ride always belongs to exactly one plan.
+    clash = db.query_one(
+        "SELECT name, start_date, race_date FROM journeys WHERE athlete_id = ?"
+        " AND status IN ('scheduled', 'creating', 'active') AND start_date <= ? AND race_date >= ?",
+        [athlete_id, end_date.isoformat(), start_date.isoformat()],
+    )
+    if clash:
+        raise HTTPException(
+            409, f"This overlaps \"{clash['name']}\" ({clash['start_date']} to {clash['race_date']})."
+            f" Start after {clash['race_date']}, or remove that journey first.",
+        )
+    scheduled = start_date > day
 
     journey_id = str(uuid.uuid4())
     with db.transaction() as conn:
@@ -61,11 +74,14 @@ def create_journey_endpoint(
             [athlete_id, day.isoformat(), payload.current_ftp],
         )
         conn.execute(
-            "INSERT INTO journeys (id, athlete_id, name, goal_type, start_date, race_date)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO journeys (id, athlete_id, name, goal_type, start_date, race_date, status)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
             [journey_id, athlete_id, payload.journey_name, payload.goal_type, start_date.isoformat(),
-             end_date.isoformat()],
+             end_date.isoformat(), "scheduled" if scheduled else "creating"],
         )
+    if scheduled:
+        return {"status": "scheduled", "journey_id": journey_id,
+                "message": f"Your coach builds the plan on {start_date.isoformat()}, from your fitness then."}
     latest = db.query_one(
         "SELECT ctl FROM daily_metrics WHERE athlete_id = ? ORDER BY date DESC LIMIT 1", [athlete_id]
     )
@@ -78,17 +94,28 @@ def create_journey_endpoint(
     return {"status": "processing", "message": "AI is building your plan...", "journey_id": journey_id}
 
 
+def start_due_journeys(athlete_id: int, background_tasks: BackgroundTasks) -> None:
+    """Scheduled journeys whose day has come switch to 'creating' now; the plan follows."""
+    for journey in claim_due_journeys(athlete_id, today()):
+        background_tasks.add_task(generate_scheduled_plan, journey)
+
+
 @router.get("/journeys")
-def list_journeys(athlete_id: int = Depends(current_athlete)):
+def list_journeys(background_tasks: BackgroundTasks, athlete_id: int = Depends(current_athlete)):
+    """The athlete's journeys in time order."""
+    start_due_journeys(athlete_id, background_tasks)
     return db.query(
         "SELECT id, name, goal_type, start_date, race_date, status, error, created_at FROM journeys"
-        " WHERE athlete_id = ? AND status != 'archived' ORDER BY created_at DESC",
+        " WHERE athlete_id = ? AND status != 'archived' ORDER BY start_date",
         [athlete_id],
     )
 
 
 @router.get("/journeys/{journey_id}")
-def get_journey(journey_id: str, athlete_id: int = Depends(current_athlete)):
+def get_journey(
+    journey_id: str, background_tasks: BackgroundTasks, athlete_id: int = Depends(current_athlete)
+):
+    start_due_journeys(athlete_id, background_tasks)
     return owned_journey(journey_id, athlete_id)
 
 

@@ -182,12 +182,23 @@ export default function JourneyOverview({ route, navigation }) {
     </View>
   );
 
-  if (journey.status === 'creating' || journey.status === 'failed') {
+  if (journey.status === 'creating' || journey.status === 'failed' || journey.status === 'scheduled') {
     return (
       <SafeAreaView style={styles.screen} edges={['top']}>
         {header}
         <View style={styles.center}>
-          {journey.status === 'creating' ? (
+          {journey.status === 'scheduled' ? (
+            <>
+              <Ionicons name="calendar-outline" size={40} color={colors.accent} />
+              <Text style={styles.stateText}>Starts {formatDay(journey.start_date)}</Text>
+              <Text style={styles.stateSub}>
+                Your coach builds the plan on that day, from your fitness and FTP then.
+              </Text>
+              <TouchableOpacity style={styles.secondaryBtn} onPress={handleRemove}>
+                <Text style={styles.secondaryText}>Remove journey</Text>
+              </TouchableOpacity>
+            </>
+          ) : journey.status === 'creating' ? (
             <>
               <ActivityIndicator color={colors.accent} />
               <Text style={styles.stateText}>Your coach is building the plan…</Text>

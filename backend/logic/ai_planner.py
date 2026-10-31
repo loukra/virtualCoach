@@ -15,6 +15,7 @@ from logic.guardrails import build_peak_tss, validate_days, validate_macro
 from logic.schemas import MacroPlan, PlanBlock, PlanDay
 
 BLOCK_DAYS = 28  # a multiple of 7, so no week is split across two calls
+AFTER_RACE_EASY_DAYS = 3  # no hard session in the first days after a race
 
 
 def block_ranges(total_days: int, offset: int = 0) -> list[tuple[int, int]]:
@@ -107,15 +108,27 @@ def build_plan(
     current_ctl: float,
     longest_ride_min: int | None = None,
     goal_type: str = "race",
+    after_race: date | None = None,
 ) -> list[PlanDay]:
     settings = get_settings()
     total_days = (race_date - start_date).days + 1
     offset = start_date.weekday()
     test_days = ftp.test_days(total_days, goal_type, offset)
+    easy_days = 0
+    if after_race:
+        # Recover first: no hard session for the first days, no FTP test that week (the race
+        # itself says how fit the athlete is).
+        easy_days = max(0, AFTER_RACE_EASY_DAYS - ((start_date - after_race).days - 1))
+        test_days = [n for n in test_days if n > 7]
     context = plan_context(
         goal, start_date, race_date, current_date, ftp_watts, weight, current_ctl, longest_ride_min,
         goal_type,
     )
+    if after_race:
+        context += (
+            f"\n- The athlete raced on {after_race.isoformat()}, just before this plan:"
+            + (f" days 1-{easy_days} are Rest, Recovery or Endurance." if easy_days else " recovered by now.")
+        )
 
     weeks = plan_week(total_days, offset)
     load_target = (
@@ -162,7 +175,7 @@ def build_plan(
             user_input=user_input,
             schema=PlanBlock,
             validate=lambda b, lo=first, hi=last: validate_days(
-                b.days, lo, hi, total_days, week_targets, goal_type, test_days, offset
+                b.days, lo, hi, total_days, week_targets, goal_type, test_days, offset, easy_days
             ),
             athlete_id=athlete_id,
             journey_id=journey_id,

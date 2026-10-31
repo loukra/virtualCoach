@@ -51,3 +51,26 @@ def test_unknown_errors_stay_in_the_log(athlete, monkeypatch):
     monkeypatch.setattr(workers, "backfill_missing_activities", fail_with(RuntimeError("secret detail")))
     workers.run_sync(athlete)
     assert status(athlete)["sync_error"] == "The Strava import failed. Try again later."
+
+
+def test_sync_builds_a_due_plan_from_todays_fitness(athlete, monkeypatch):
+    from core.dates import today
+
+    db.execute("UPDATE athletes SET ftp = 262, weight_kg = 74 WHERE id = ?", [athlete])
+    db.execute("INSERT INTO daily_metrics (athlete_id, date, ctl, atl, tsb) VALUES (?, ?, 31.5, 30, 1.5)",
+               [athlete, today().isoformat()])
+    db.execute("INSERT INTO journeys (id, athlete_id, name, goal_type, start_date, race_date, status)"
+               " VALUES ('j', ?, 'Spring', 'race', ?, '2099-06-01', 'scheduled')",
+               [athlete, today().isoformat()])
+    calls = []
+    monkeypatch.setattr(workers, "backfill_missing_activities", lambda *_: 0)
+    monkeypatch.setattr(workers, "calculate_daily_metrics", lambda *_: None)
+    monkeypatch.setattr(workers, "run_ai_plan_generation", lambda *a: calls.append(a))
+    workers.run_sync(athlete)
+    assert len(calls) == 1
+    journey_id, _, goal, ftp, weight, _, _, current_date, ctl, goal_type = calls[0]
+    assert (journey_id, goal, ftp, weight, current_date, ctl, goal_type) == (
+        "j", "Spring", 262, 74, today(), 31.5, "race")
+    assert db.query_one("SELECT status FROM journeys")["status"] == "creating"
+    workers.run_sync(athlete)
+    assert len(calls) == 1

@@ -56,11 +56,17 @@ def migrate() -> None:
     """Applies migrations/NNN_*.sql in order; PRAGMA user_version stores the last one applied."""
     with closing(connect()) as conn:
         current = conn.execute("PRAGMA user_version").fetchone()[0]
+        # Off while migrating: rebuilding a table (drop and rename) would otherwise cascade-delete
+        # the rows that reference it. Checked again before each migration is committed.
+        conn.execute("PRAGMA foreign_keys = OFF")
         for file in sorted(MIGRATIONS_DIR.glob("*.sql")):
             version = int(file.name.split("_", 1)[0])
             if version <= current:
                 continue
             log.info("Applying migration %s", file.name)
-            conn.executescript(
-                f"BEGIN; {file.read_text(encoding='utf-8')}\nPRAGMA user_version = {version}; COMMIT;"
-            )
+            conn.executescript(f"BEGIN; {file.read_text(encoding='utf-8')}\nPRAGMA user_version = {version};")
+            if conn.execute("PRAGMA foreign_key_check").fetchall():
+                conn.execute("ROLLBACK")
+                raise RuntimeError(f"Migration {file.name} breaks foreign keys")
+            conn.execute("COMMIT")
+        conn.execute("PRAGMA foreign_keys = ON")

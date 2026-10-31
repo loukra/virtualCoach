@@ -113,6 +113,7 @@ def validate_days(
     goal_type: str = "race",
     test_days: Collection[int] = (),
     offset: int = 0,
+    easy_days: int = 0,
 ) -> list[str]:
     errors: list[str] = []
     if [d.day_number for d in days] != list(range(first_day, last_day + 1)):
@@ -148,6 +149,8 @@ def validate_days(
         errors.append("This plan has no race: use no Race days.")
 
     for d in days:
+        if d.day_number <= easy_days and d.planned_workout_type not in EASY_TYPES | {"Endurance"}:
+            errors.append(f"Day {d.day_number} follows the race: make it Rest, Recovery or Endurance.")
         if d.planned_workout_type == "FTP Test" and d.day_number not in test_days:
             errors.append(f"Day {d.day_number}: FTP Test only on the days listed under FTP TESTS.")
     for n in test_days:
