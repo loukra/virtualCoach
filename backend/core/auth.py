@@ -1,31 +1,30 @@
+import hashlib
 import logging
+import secrets
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from core.config import get_settings
-from core.db import get_db
+from core import db
 
 log = logging.getLogger(__name__)
 bearer = HTTPBearer(auto_error=False)
 
 
-def current_user_id(creds: HTTPAuthorizationCredentials | None = Depends(bearer)) -> str:
-    """Resolves the caller from their Supabase access token. Never trust a user id from the body."""
+def hash_token(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def new_token() -> str:
+    return secrets.token_urlsafe(32)
+
+
+def current_athlete(creds: HTTPAuthorizationCredentials | None = Depends(bearer)) -> int:
+    """Resolves the athlete from their access token (see manage.py). Never trust an id from the body."""
     if creds is None:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Missing bearer token")
-
-    try:
-        res = get_db().auth.get_user(creds.credentials)
-    except Exception:
-        log.info("Rejected an invalid or expired token")
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid or expired token") from None
-    if not res or not res.user:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid or expired token")
-
-    user_id = res.user.id
-    allowed = get_settings().allowed_ids
-    if allowed and user_id not in allowed:
-        log.warning("User %s is not in ALLOWED_USER_IDS", user_id)
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "This user may not use this backend")
-    return user_id
+    row = db.query_one("SELECT id FROM athletes WHERE token_hash = ?", [hash_token(creds.credentials)])
+    if row is None:
+        log.warning("Rejected a request with an unknown token")
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Unknown token")
+    return row["id"]

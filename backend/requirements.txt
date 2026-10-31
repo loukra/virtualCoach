@@ -1,6 +1,5 @@
 fastapi==0.162.0
 uvicorn[standard]==0.54.0
-supabase==2.33.0
 openai==3.42.0
 stravalib==2.6
 numpy==2.5.4

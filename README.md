@@ -3,13 +3,17 @@
 A personal AI cycling coach. It imports rides from Strava, tracks fitness and fatigue with the
 Banister model (CTL / ATL / TSB), lets an LLM build a periodized plan towards a race, and
 prescribes each day's workout from the plan, the athlete's check-in and the last week of
-training. Built for one athlete (me), run on my own server.
+training. Built for my own use (and a training partner), run on my own server.
 
 ```
-mobile/    Expo / React Native app (Supabase auth, reads its data directly via RLS)
-backend/   FastAPI service: Strava sync, training math, AI plan and workout generation
-supabase/  Database schema and Row Level Security as a migration
+mobile/    Expo / React Native app; talks only to the backend
+backend/   FastAPI service: SQLite storage, Strava sync, training math, AI plan and workout generation
 ```
+
+Each athlete gets a personal access token (`manage.py add-athlete`). The backend stores only
+its hash and scopes every query to the token's athlete, so two people can share one server
+without seeing each other's data. Everything lives in one SQLite file, so there is no
+database service to run or to pay for.
 
 ## How the AI part works
 
@@ -39,39 +43,46 @@ Data minimization: ride names are not sent to the model, responses are not store
 
 ## Setup
 
-### 1. Supabase
+### 1. Strava
 
-1. Create a project, then apply the schema: `supabase db push` with the Supabase CLI, or paste
-   `supabase/migrations/*.sql` into the SQL editor.
-2. Create your account (sign up once in the app or in the dashboard), then **disable sign-ups**
-   (Authentication > Sign In / Providers) and put your user id into `ALLOWED_USER_IDS`.
+Create an API application at <https://www.strava.com/settings/api>. Set the *Authorization
+Callback Domain* to the host of the redirect URI the app uses (`virtualcoach://strava` in a
+development build, `exp://<your-ip>:8081/--/strava` in Expo Go). A new Strava application
+starts with room for a single connected athlete; for a second person, check the athlete
+capacity on the API settings page and ask Strava to raise it.
 
-### 2. Strava
-
-Create an API application at <https://www.strava.com/settings/api>. New applications are limited
-to one connected athlete, which is exactly this use case. Set the *Authorization Callback Domain*
-to the host of the redirect URI the app uses (`virtualcoach://strava` in a development build,
-`exp://<your-ip>:8081/--/strava` in Expo Go).
-
-### 3. Backend
+### 2. Backend
 
 ```bash
 cd backend
-cp .env.example .env          # fill in
+cp .env.example .env          # OpenAI key, Strava client id and secret
 python3.12 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
 .venv/bin/uvicorn main:app --reload --host 0.0.0.0
 ```
 
-Production: `docker compose up -d --build` on the server, behind a reverse proxy with HTTPS
-(for example Caddy: `coach.example.com { reverse_proxy 127.0.0.1:8000 }`).
+The database (`data/coach.db`) and its tables are created on start. Then add the athletes;
+each command prints a token once, which goes into the app's sign-in screen:
 
-### 4. App
+```bash
+.venv/bin/python -m manage add-athlete "Louis"
+.venv/bin/python -m manage list
+.venv/bin/python -m manage new-token "Louis"   # lost or leaked token: the old one stops working
+```
+
+Production: `docker compose up -d --build` on the server, behind a reverse proxy with HTTPS
+(for example Caddy: `coach.example.com { reverse_proxy 127.0.0.1:8000 }`), then
+`docker compose exec backend python -m manage add-athlete "Louis"`. The database sits in the
+`coach-data` volume; `docker-compose.yml` shows how to take a consistent backup.
+
+### 3. App
 
 ```bash
 cd mobile
-cp .env.example .env          # backend URL, Supabase URL + anon key, Strava client id
+cp .env.example .env          # backend URL, Strava client id (nothing secret)
 npm install && npx expo start
 ```
+
+Sign in with the token, fill in the profile, connect Strava, then create a journey.
 
 ## Tests and evals
 
@@ -87,11 +98,18 @@ errors that only show on Linux).
 
 ## API
 
-All endpoints except `/` and `/health` require `Authorization: Bearer <Supabase access token>`;
-the user is taken from the token.
+All endpoints except `/` and `/health` require `Authorization: Bearer <athlete token>`;
+the athlete is taken from the token, request bodies never carry an id.
 
 | Method | Path | Purpose |
 |---|---|---|
+| GET | `/me` | profile, Strava and sync state |
+| PUT | `/profile` | goal, FTP, max heart rate, weight |
+| GET | `/metrics?days=90` | daily CTL / ATL / TSB |
+| GET | `/journeys`, `/journeys/{id}` | goals and their plan status |
+| GET | `/journeys/{id}/today` | today's planned day, check-in, workout and form |
+| GET | `/journeys/{id}/calendar` | the whole plan plus the rides done in its range |
+| DELETE | `/journeys/{id}` | hide a journey (data stays) |
 | POST | `/connect-strava` | OAuth code from the app; token exchange and 90-day import in the background |
 | POST | `/sync` | import new rides, recompute CTL/ATL/TSB |
 | POST | `/check-in` | today's mood and leg scores |
@@ -102,8 +120,9 @@ the user is taken from the token.
 ## Known limits
 
 - Strava data reaches OpenAI. Strava's API agreement requires the user's explicit consent for
-  sharing with third parties; as the only user, I consent. Opening the app to others would need
-  a consent screen and a check of Strava's current AI terms first.
+  sharing with third parties; both users here know and agree. Opening the app to more people
+  would need a consent screen and a check of Strava's current AI terms first.
+- Tokens are long-lived; revoke one with `manage.py new-token`.
 - No Strava webhooks: the app syncs when it opens. Deauthorizing on Strava's side does not yet
   delete the imported data.
 - Background jobs run inside the API process (FastAPI `BackgroundTasks`); a restart during plan

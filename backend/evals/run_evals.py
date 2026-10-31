@@ -16,10 +16,7 @@ import time
 from datetime import date, timedelta
 from pathlib import Path
 
-for key, value in {
-    "SUPABASE_URL": "http://unused", "SUPABASE_SERVICE_KEY": "unused",
-    "STRAVA_CLIENT_ID": "0", "STRAVA_CLIENT_SECRET": "unused",
-}.items():
+for key, value in {"STRAVA_CLIENT_ID": "0", "STRAVA_CLIENT_SECRET": "unused"}.items():
     os.environ.setdefault(key, value)
 
 import logic.ai as ai  # noqa: E402
@@ -47,7 +44,7 @@ def run_workout_scenario(s: dict) -> dict:
             kind="workout", model=get_settings().workout_model, prompt_name="workout",
             user_input=workout_input(ctx, s["available_time"], reason), schema=Workout,
             validate=lambda w: validate_workout(w, s["available_time"], s["max_hr"], reason is not None),
-            user_id="eval",
+            athlete_id=None,
         )
     except GenerationError as e:
         workout, failure = None, "; ".join(e.errors)
@@ -82,7 +79,7 @@ def run_plan_scenario() -> dict:
     started = time.monotonic()
     try:
         days = build_plan(
-            user_id="eval", journey_id=None, goal="Gran Fondo, 160 km with 1800 m climbing",
+            athlete_id=None, journey_id=None, goal="Gran Fondo, 160 km with 1800 m climbing",
             start_date=start_date, race_date=start_date + timedelta(days=69),
             current_date=start_date, ftp=250, weight=75, current_ctl=55,
         )

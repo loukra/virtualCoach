@@ -3,8 +3,9 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from core import db
 from core.config import get_settings
-from routers import checkin, dailysync, journeys, strava, workout
+from routers import athlete, checkin, dailysync, journeys, strava, workout
 
 
 @asynccontextmanager
@@ -14,10 +15,7 @@ async def lifespan(app: FastAPI):
         level=settings.log_level,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    if not settings.allowed_ids:
-        logging.getLogger(__name__).warning(
-            "ALLOWED_USER_IDS is empty: every account that can sign in may use this backend"
-        )
+    db.migrate()
     yield
 
 
@@ -34,6 +32,7 @@ def health():
     return {"status": "ok"}
 
 
+app.include_router(athlete.router)
 app.include_router(journeys.router)
 app.include_router(dailysync.router)
 app.include_router(workout.router)

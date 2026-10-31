@@ -3,7 +3,14 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
-# The caller's user id always comes from the access token (core.auth), never from these bodies.
+# The athlete always comes from the access token (core.auth), never from these bodies.
+
+
+class ProfileUpdate(BaseModel):
+    goal: str = Field(min_length=1, max_length=200)
+    ftp: int = Field(ge=50, le=600)
+    max_heart_rate: int = Field(ge=120, le=230)
+    weight_kg: float = Field(ge=30, le=200)
 
 
 class CheckInRequest(BaseModel):

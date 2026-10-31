@@ -3,7 +3,7 @@ import { View, Text, Modal, TouchableOpacity, StyleSheet, ActivityIndicator, Ale
 import { Ionicons } from '@expo/vector-icons';
 import { apiPost } from '../lib/api';
 
-export default function CheckInModal({ visible, onClose, userId, currentValues, onSave }) {
+export default function CheckInModal({ visible, onClose, currentValues, onSave }) {
   const [mood, setMood] = useState(3);
   const [legs, setLegs] = useState(3);
   const [saving, setSaving] = useState(false);
@@ -28,9 +28,10 @@ export default function CheckInModal({ visible, onClose, userId, currentValues, 
     }
   };
 
-  const RatingRow = ({ label, value, setValue, icon }) => (
+  const RatingRow = ({ label, hint, value, setValue }) => (
     <View style={{marginBottom: 20}}>
-        <Text style={styles.label}>{label}: {value}/5</Text>
+        <Text style={styles.label}>{label}</Text>
+        <Text style={styles.hint}>{hint}</Text>
         <View style={styles.stars}>
             {[1, 2, 3, 4, 5].map((n) => (
                 <TouchableOpacity key={n} onPress={() => setValue(n)} style={[styles.starBtn, value === n && styles.activeStar]}>
@@ -45,13 +46,13 @@ export default function CheckInModal({ visible, onClose, userId, currentValues, 
     <Modal visible={visible} transparent={true} animationType="slide" onRequestClose={onClose}>
       <View style={styles.overlay}>
         <View style={styles.card}>
-            <Text style={styles.title}>Daily Check-In 📝</Text>
+            <Text style={styles.title}>How do you feel today?</Text>
             
-            <RatingRow label="Mood / Energy (1=Worst)" value={mood} setValue={setMood} />
-            <RatingRow label="Leg Soreness (1=Dead)" value={legs} setValue={setLegs} />
+            <RatingRow label="Energy" hint="1 = exhausted · 5 = great" value={mood} setValue={setMood} />
+            <RatingRow label="Legs" hint="1 = very sore · 5 = fresh" value={legs} setValue={setLegs} />
 
             <TouchableOpacity style={styles.saveBtn} onPress={handleSave} disabled={saving}>
-                {saving ? <ActivityIndicator color="white"/> : <Text style={styles.saveText}>Save Check-In</Text>}
+                {saving ? <ActivityIndicator color="white"/> : <Text style={styles.saveText}>Save</Text>}
             </TouchableOpacity>
             
             <TouchableOpacity style={styles.closeBtn} onPress={onClose}>
@@ -67,7 +68,8 @@ const styles = StyleSheet.create({
   overlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.8)', justifyContent: 'center', alignItems: 'center' },
   card: { backgroundColor: '#1a1a1a', padding: 25, borderRadius: 15, width: '85%' },
   title: { color: 'white', fontSize: 20, fontWeight: 'bold', marginBottom: 20, textAlign: 'center' },
-  label: { color: '#ccc', marginBottom: 10, fontSize: 16 },
+  label: { color: '#ccc', fontSize: 16, fontWeight: 'bold' },
+  hint: { color: '#777', fontSize: 12, marginTop: 2, marginBottom: 10 },
   stars: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 10 },
   starBtn: { backgroundColor: '#333', width: 40, height: 40, borderRadius: 20, justifyContent: 'center', alignItems: 'center' },
   activeStar: { backgroundColor: '#ff4d4d' },

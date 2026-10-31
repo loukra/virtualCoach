@@ -1,20 +1,20 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { 
   StyleSheet, 
   View, 
   Text, 
   TouchableOpacity, 
-  SafeAreaView, 
   FlatList, 
   ActivityIndicator 
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import { supabase } from '../lib/supabase';
-import { apiPost } from '../lib/api';
+import { APP_NAME } from '../theme';
+import { apiGet, apiPost } from '../lib/api';
 import CreateJourneyModal from '../components/CreateJourneyModal';
 import { useJourney } from '../context/JourneyContext';
 // 👇 IMPORT NAVIGATION HOOK
-import { useNavigation } from '@react-navigation/native';
+import { useNavigation, useFocusEffect } from '@react-navigation/native';
 
 export default function Dashboard() {
   const navigation = useNavigation();
@@ -23,25 +23,31 @@ export default function Dashboard() {
   const [isSyncing, setIsSyncing] = useState(false);
   const [createModalVisible, setCreateModalVisible] = useState(false);
 
-  // 1. Initial Load
+  // New Strava rides once per app start; the list reloads whenever the tab comes back into view.
   useEffect(() => {
-    fetchJourneys();
-    // Start background sync silently
     triggerApiSync();
   }, []);
 
-  const fetchJourneys = async () => {
-    const { data: { session } } = await supabase.auth.getSession();
-    if (!session) return;
+  useFocusEffect(
+    useCallback(() => {
+      fetchJourneys();
+    }, [])
+  );
 
-    // Fetch ALL journeys
-    const { data } = await supabase
-      .from('journeys')
-      .select('*')
-      .eq('user_id', session.user.id)
-      .order('created_at', { ascending: false });
-    
-    setJourneys(data || []);
+  // While a plan is being built, check every few seconds so the card updates on its own.
+  const anyCreating = journeys.some((j) => j.status === 'creating');
+  useEffect(() => {
+    if (!anyCreating) return undefined;
+    const timer = setInterval(fetchJourneys, 4000);
+    return () => clearInterval(timer);
+  }, [anyCreating]);
+
+  const fetchJourneys = async () => {
+    try {
+      setJourneys(await apiGet('/journeys'));
+    } catch (e) {
+      console.log('Could not load journeys:', e.message);
+    }
   };
 
   const triggerApiSync = async () => {
@@ -61,7 +67,7 @@ export default function Dashboard() {
   };
 
   return (
-    <SafeAreaView style={styles.container}>
+    <SafeAreaView style={styles.container} edges={['top']}>
       <CreateJourneyModal visible={createModalVisible} onClose={() => setCreateModalVisible(false)} onJourneyCreated={handleJourneyCreated} />
 
       {/* --- HEADER (Updated for Bottom Tabs) --- */}
@@ -70,7 +76,7 @@ export default function Dashboard() {
         {/* Left Side: Brand Logo (Replaces Burger Menu) */}
         <View style={{flexDirection:'row', alignItems:'center'}}>
             <Ionicons name="bicycle" size={24} color="#ff4d4d" style={{marginRight: 10}}/>
-            <Text style={{color:'#fff', fontWeight:'bold', fontSize: 18}}>VELO AI</Text>
+            <Text style={{color:'#fff', fontWeight:'bold', fontSize: 18}}>{APP_NAME}</Text>
         </View>
 
         {/* Right Side: Sync Status */}
@@ -99,6 +105,8 @@ export default function Dashboard() {
                           <View>
                               <Text style={styles.cardTitle}>{item.name}</Text>
                               <Text style={styles.cardDate}>Race: {item.race_date}</Text>
+                              {item.status === 'creating' && <Text style={styles.cardStatus}>Building plan…</Text>}
+                              {item.status === 'failed' && <Text style={[styles.cardStatus, {color:'#ff4d4d'}]}>Plan failed</Text>}
                           </View>
                           <View style={{alignItems:'flex-end'}}>
                               {item.status === 'creating' ? (
@@ -110,7 +118,7 @@ export default function Dashboard() {
                       </TouchableOpacity>
                   )}
                   ListEmptyComponent={
-                      <Text style={{color:'#666', textAlign:'center', marginTop: 50}}>No journeys yet.</Text>
+                      <Text style={{color:'#666', textAlign:'center', marginTop: 50, lineHeight: 22}}>No journeys yet.{'\n'}Tap + to plan your next goal.</Text>
                   }
               />
 
@@ -125,7 +133,7 @@ export default function Dashboard() {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#111', paddingTop: 40 },
+  container: { flex: 1, backgroundColor: '#111' },
   header: { flexDirection: 'row', justifyContent: 'space-between', alignItems:'center', padding: 20, borderBottomWidth: 1, borderBottomColor: '#222' },
   content: { flex: 1 },
   
@@ -133,6 +141,7 @@ const styles = StyleSheet.create({
   card: { backgroundColor: '#1a1a1a', padding: 20, borderRadius: 12, flexDirection:'row', justifyContent:'space-between', alignItems:'center' },
   cardTitle: { color: 'white', fontSize: 18, fontWeight: 'bold' },
   cardDate: { color: '#888', fontSize: 12, marginTop: 4 },
+  cardStatus: { color: '#888', fontSize: 12, marginTop: 4, fontStyle: 'italic' },
   
   // FAB (Floating Action Button)
   fab: { position: 'absolute', bottom: 30, right: 20, backgroundColor: '#ff4d4d', width: 60, height: 60, borderRadius: 30, justifyContent: 'center', alignItems: 'center', elevation: 5, shadowColor:'#000', shadowOffset:{width:0,height:4}, shadowOpacity:0.3, shadowRadius:4 },

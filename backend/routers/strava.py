@@ -1,6 +1,7 @@
 from fastapi import APIRouter, BackgroundTasks, Depends
 
-from core.auth import current_user_id
+from core import db
+from core.auth import current_athlete
 from logic.workers import run_onboarding_process
 from models import ConnectRequest
 
@@ -11,8 +12,10 @@ router = APIRouter()
 def connect_strava(
     payload: ConnectRequest,
     background_tasks: BackgroundTasks,
-    user_id: str = Depends(current_user_id),
+    athlete_id: int = Depends(current_athlete),
 ):
     """Receives the Strava OAuth code from the app; token exchange and import run in the background."""
-    background_tasks.add_task(run_onboarding_process, user_id, payload.code)
+    # Set before answering, so the app's next /me already shows the import as running.
+    db.execute("UPDATE athletes SET sync_status = 'syncing' WHERE id = ?", [athlete_id])
+    background_tasks.add_task(run_onboarding_process, athlete_id, payload.code)
     return {"message": "Onboarding started", "status": "processing"}

@@ -44,7 +44,7 @@ def run(validate=None):
         kind="workout", model="test-model", prompt_name="workout", user_input="ATHLETE ...",
         schema=Workout,
         validate=validate or (lambda w: validate_workout(w, 60, 190, False)),
-        user_id="user-1",
+        athlete_id=1,
     )
 
 

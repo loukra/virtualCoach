@@ -2,9 +2,9 @@
 import json
 from datetime import date, timedelta
 
+from core import db
 from core.config import get_settings
 from core.dates import today
-from core.db import get_db
 from logic.ai import generate_structured
 from logic.guardrails import validate_workout
 from logic.schemas import Workout
@@ -54,53 +54,44 @@ def format_compliance_history(plans: list[dict], activities: list[dict], day: da
     return "\n".join(lines)
 
 
-def get_todays_context(user_id: str, journey: dict) -> dict:
-    db = get_db()
-    day = today()
-    week_ago = (day - timedelta(days=7)).isoformat()
+def get_todays_context(athlete_id: int, journey: dict) -> dict:
+    day = today().isoformat()
+    week_ago = (today() - timedelta(days=7)).isoformat()
 
-    profile = (
-        db.table("profiles").select("ftp, weight_kg, max_heart_rate")
-        .eq("id", user_id).maybe_single().execute()
+    profile = db.query_one("SELECT ftp, max_heart_rate FROM athletes WHERE id = ?", [athlete_id]) or {}
+    stats = db.query_one(
+        "SELECT ctl, atl, tsb FROM daily_metrics WHERE athlete_id = ? AND date <= ?"
+        " ORDER BY date DESC LIMIT 1",
+        [athlete_id, day],
     )
-    profile = (profile.data if profile else None) or {}
-    stats = (
-        db.table("daily_metrics").select("ctl, atl, tsb")
-        .eq("user_id", user_id).lte("date", day.isoformat())
-        .order("date", desc=True).limit(1).execute()
-    ).data
-    plan = (
-        db.table("master_plan").select("*")
-        .eq("journey_id", journey["id"]).eq("date", day.isoformat()).execute()
-    ).data
-    checkin = (
-        db.table("daily_checkins").select("feel_score, soreness_score, notes")
-        .eq("user_id", user_id).eq("date", day.isoformat()).execute()
-    ).data
-    recent_plans = (
-        db.table("master_plan")
-        .select("date, planned_workout_type, planned_duration_min, planned_tss")
-        .eq("journey_id", journey["id"]).gte("date", week_ago).lt("date", day.isoformat())
-        .execute()
-    ).data
-    recent_rides = (
-        db.table("activities").select("start_date_local, sport_type, tss, moving_time")
-        .eq("user_id", user_id).gte("start_date_local", week_ago)
-        .lt("start_date_local", day.isoformat()).execute()
-    ).data
+    plan = db.query_one("SELECT * FROM master_plan WHERE journey_id = ? AND date = ?", [journey["id"], day])
+    checkin = db.query_one(
+        "SELECT feel_score, soreness_score, notes FROM daily_checkins WHERE athlete_id = ? AND date = ?",
+        [athlete_id, day],
+    )
+    recent_plans = db.query(
+        "SELECT date, planned_workout_type, planned_duration_min, planned_tss FROM master_plan"
+        " WHERE journey_id = ? AND date >= ? AND date < ?",
+        [journey["id"], week_ago, day],
+    )
+    recent_rides = db.query(
+        "SELECT start_date_local, sport_type, tss, moving_time FROM activities"
+        " WHERE athlete_id = ? AND start_date_local >= ? AND start_date_local < ?",
+        [athlete_id, week_ago, day],
+    )
 
     start, race = date.fromisoformat(journey["start_date"]), date.fromisoformat(journey["race_date"])
     return {
-        "day": day,
+        "day": today(),
         "ftp": profile.get("ftp") or DEFAULT_FTP,
         "max_hr": profile.get("max_heart_rate") or DEFAULT_MAX_HR,
         "max_hr_is_estimate": not profile.get("max_heart_rate"),
-        "stats": stats[0] if stats else None,
-        "plan": plan[0] if plan else None,
-        "checkin": checkin[0] if checkin else None,
+        "stats": stats,
+        "plan": plan,
+        "checkin": checkin,
         "goal": journey["name"],
-        "days_until_race": (race - day).days,
-        "current_week": (day - start).days // 7 + 1,
+        "days_until_race": (race - today()).days,
+        "current_week": (today() - start).days // 7 + 1,
         "total_weeks": (race - start).days // 7 + 1,
         "compliance": format_compliance_history(recent_plans, recent_rides, day),
     }
@@ -146,8 +137,8 @@ LAST SEVEN DAYS (plan vs actual)
 {ctx['compliance']}{recovery}"""
 
 
-def generate_workout(user_id: str, journey: dict, available_time: int) -> dict:
-    ctx = get_todays_context(user_id, journey)
+def generate_workout(athlete_id: int, journey: dict, available_time: int) -> dict:
+    ctx = get_todays_context(athlete_id, journey)
     recovery_reason = forced_recovery_reason(ctx["checkin"], ctx["stats"])
     workout = generate_structured(
         kind="workout",
@@ -156,7 +147,7 @@ def generate_workout(user_id: str, journey: dict, available_time: int) -> dict:
         user_input=workout_input(ctx, available_time, recovery_reason),
         schema=Workout,
         validate=lambda w: validate_workout(w, available_time, ctx["max_hr"], recovery_reason is not None),
-        user_id=user_id,
+        athlete_id=athlete_id,
         journey_id=journey["id"],
         max_output_tokens=16000,
     )

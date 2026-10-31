@@ -1,11 +1,12 @@
 """Structured LLM calls with validation, repair and logging.
 
 Every call: the model fills a Pydantic schema (Structured Outputs), the result is checked by a
-deterministic validator, and on violations the model gets one more chance with the exact
+deterministic validator, and on violations the model gets another chance with the exact
 problems listed. Each attempt is logged to `ai_generations` (model, prompt version, tokens,
 latency, violations) so quality and cost can be followed over time.
 """
 import hashlib
+import json
 import logging
 import time
 from collections.abc import Callable
@@ -15,8 +16,8 @@ from pathlib import Path
 import openai
 from pydantic import BaseModel
 
+from core import db
 from core.config import get_settings
-from core.db import get_db
 from core.llm import get_openai
 
 log = logging.getLogger(__name__)
@@ -47,8 +48,13 @@ def repair_message(errors: list[str]) -> str:
 
 
 def _record(**row) -> None:
+    row["errors"] = json.dumps(row.get("errors", []))
+    columns = ", ".join(row)
     try:
-        get_db().table("ai_generations").insert(row).execute()
+        db.execute(
+            f"INSERT INTO ai_generations ({columns}) VALUES ({', '.join('?' * len(row))})",
+            row.values(),
+        )
     except Exception:
         log.exception("Could not log an AI generation")  # logging must never break a generation
 
@@ -61,7 +67,7 @@ def generate_structured[T: BaseModel](
     user_input: str,
     schema: type[T],
     validate: Callable[[T], list[str]],
-    user_id: str,
+    athlete_id: int | None,
     journey_id: str | None = None,
     max_output_tokens: int = 32000,
 ) -> T:
@@ -85,9 +91,10 @@ def generate_structured[T: BaseModel](
             errors = validate(parsed) if parsed is not None else ["The model refused to answer."]
         except openai.OpenAIError as e:
             _record(
-                user_id=user_id, journey_id=journey_id, kind=kind, model=model,
-                prompt_version=prompt_version, attempt=attempt, ok=False,
-                errors=[f"API error: {e}"], latency_ms=int((time.monotonic() - started) * 1000),
+                athlete_id=athlete_id, journey_id=journey_id, kind=kind, model=model,
+                prompt_version=prompt_version,
+                attempt=attempt, ok=False, errors=[f"API error: {e}"],
+                latency_ms=int((time.monotonic() - started) * 1000),
             )
             raise GenerationError(kind, [f"OpenAI API error: {e}"]) from e
         except ValueError as e:  # truncated or malformed JSON that does not fit the schema
@@ -96,8 +103,9 @@ def generate_structured[T: BaseModel](
 
         usage = getattr(response, "usage", None)
         _record(
-            user_id=user_id, journey_id=journey_id, kind=kind, model=model,
-            prompt_version=prompt_version, attempt=attempt, ok=not errors, errors=errors,
+            athlete_id=athlete_id, journey_id=journey_id, kind=kind, model=model,
+            prompt_version=prompt_version,
+            attempt=attempt, ok=not errors, errors=errors,
             latency_ms=int((time.monotonic() - started) * 1000),
             input_tokens=getattr(usage, "input_tokens", None),
             output_tokens=getattr(usage, "output_tokens", None),

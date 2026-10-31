@@ -5,18 +5,25 @@ import {
   TouchableWithoutFeedback, Keyboard 
 } from 'react-native';
 import DateTimePicker from '@react-native-community/datetimepicker';
-import { supabase } from '../lib/supabase';
-import { apiPost } from '../lib/api';
+import { apiGet, apiPost } from '../lib/api';
 import { localDateString } from '../lib/dates';
+import { parseNumber, LIMITS, rangeMessage } from '../lib/numbers';
+
+const DEFAULT_PLAN_WEEKS = 12;
+
+function weeksFromNow(weeks) {
+  const d = new Date();
+  d.setDate(d.getDate() + weeks * 7);
+  return d;
+}
 
 export default function CreateJourneyModal({ visible, onClose, onJourneyCreated }) {
   const [name, setName] = useState('');
   const [ftp, setFtp] = useState('200');
   const [weight, setWeight] = useState('75');
   
-  // 🗓️ TWO DATES NOW
-  const [raceDate, setRaceDate] = useState(new Date());
-  const [startDate, setStartDate] = useState(new Date()); // Default to Today
+  const [raceDate, setRaceDate] = useState(() => weeksFromNow(DEFAULT_PLAN_WEEKS));
+  const [startDate, setStartDate] = useState(new Date());
   
   // Controls which picker is open: 'race', 'start', or null
   const [activePicker, setActivePicker] = useState(null); 
@@ -27,29 +34,35 @@ export default function CreateJourneyModal({ visible, onClose, onJourneyCreated 
   }, [visible]);
 
   const fetchStats = async () => {
-    const { data: { session } } = await supabase.auth.getSession();
-    if (!session) return;
-    const { data } = await supabase.from('profiles').select('ftp, weight_kg').eq('id', session.user.id).single();
-    if (data) {
-        setFtp(data.ftp ? data.ftp.toString() : '200');
-        setWeight(data.weight_kg ? data.weight_kg.toString() : '75');
+    try {
+        const me = await apiGet('/me');
+        if (me.goal) setName((current) => current || me.goal);
+        setFtp(me.ftp ? me.ftp.toString() : '200');
+        setWeight(me.weight_kg ? me.weight_kg.toString() : '75');
+    } catch (e) {
+        console.log('Could not load profile:', e.message);
     }
   };
 
   const handleCreate = async () => {
-    if (!name) return Alert.alert("Missing Info", "Please enter a name for your goal.");
-    if (startDate > raceDate) return Alert.alert("Logic Error", "Start date cannot be after the race date.");
+    if (!name.trim()) return Alert.alert("Missing info", "Please enter a name for your goal.");
+    const days = Math.round((raceDate - startDate) / 86400000);
+    if (days < 6) return Alert.alert("Check the dates", "The race date must be at least one week after the start date.");
+    const ftpValue = parseNumber(ftp, LIMITS.ftp);
+    if (ftpValue === null) return Alert.alert("Check the value", rangeMessage('ftp'));
+    const weightValue = parseNumber(weight, LIMITS.weight);
+    if (weightValue === null) return Alert.alert("Check the value", rangeMessage('weight'));
 
     setLoading(true);
     try {
         await apiPost('/create-journey', {
-            journey_name: name,
+            journey_name: name.trim(),
             race_date: localDateString(raceDate),
             start_date: localDateString(startDate),
-            current_ftp: parseInt(ftp, 10),
-            current_weight: parseFloat(weight)
+            current_ftp: ftpValue,
+            current_weight: weightValue
         });
-        Alert.alert("Success", "AI is building your plan based on your timeline.");
+        Alert.alert("Plan on the way", "Your coach is building the plan. This takes a minute or two.");
         onJourneyCreated();
         onClose();
     } catch (e) {
@@ -120,7 +133,7 @@ export default function CreateJourneyModal({ visible, onClose, onJourneyCreated 
             <View style={styles.card}>
               
               <View style={styles.headerRow}>
-                <Text style={styles.title}>New Journey 🎯</Text>
+                <Text style={styles.title}>New Journey</Text>
                 <TouchableOpacity onPress={onClose}><Text style={{color:'#666', fontSize: 20}}>✕</Text></TouchableOpacity>
               </View>
 
@@ -135,14 +148,14 @@ export default function CreateJourneyModal({ visible, onClose, onJourneyCreated 
 
               {/* 🗓️ START DATE (When did you start training?) */}
               <DateInput 
-                 label="Training Start Date (Default: Today)" 
+                 label="Training start" 
                  dateValue={startDate} 
                  pickerType="start" 
               />
 
               {/* 🏁 RACE DATE */}
               <DateInput 
-                 label="Race / Goal Date" 
+                 label="Race / goal date" 
                  dateValue={raceDate} 
                  pickerType="race" 
               />
@@ -150,11 +163,11 @@ export default function CreateJourneyModal({ visible, onClose, onJourneyCreated 
               <View style={{flexDirection:'row', gap: 10, marginTop: 5}}>
                 <View style={{flex:1}}>
                     <Text style={styles.label}>FTP (W)</Text>
-                    <TextInput style={styles.input} keyboardType="numeric" value={ftp} onChangeText={setFtp} returnKeyType="done" />
+                    <TextInput style={styles.input} keyboardType="number-pad" value={ftp} onChangeText={setFtp} returnKeyType="done" />
                 </View>
                 <View style={{flex:1}}>
                     <Text style={styles.label}>Weight (kg)</Text>
-                    <TextInput style={styles.input} keyboardType="numeric" value={weight} onChangeText={setWeight} returnKeyType="done" />
+                    <TextInput style={styles.input} keyboardType="decimal-pad" value={weight} onChangeText={setWeight} returnKeyType="done" />
                 </View>
               </View>
 

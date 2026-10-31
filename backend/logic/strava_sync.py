@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 import numpy as np
 from stravalib.client import Client
 
-from core.db import fetch_all, get_db
+from core import db
 from logic.strava_auth import get_valid_token
 
 log = logging.getLogger(__name__)
@@ -21,7 +21,7 @@ LTHR_FRACTION = 0.91
 TIME_ONLY_TSS_PER_HOUR = 50
 STREAM_PAUSE_S = 0.5  # spreads stream requests over time for Strava's rate limits
 
-_sync_locks: dict[str, threading.Lock] = {}
+_sync_locks: dict[int, threading.Lock] = {}
 _locks_guard = threading.Lock()
 
 
@@ -95,7 +95,7 @@ def _stream(streams, key) -> np.ndarray:
     return np.array([x if x is not None else 0 for x in streams[key].data], dtype=float)
 
 
-def build_ride(act, streams, user_id, ftp, max_hr) -> dict:
+def build_ride(act, streams, athlete_id, ftp, max_hr) -> dict:
     watts = clean_power_spikes(_stream(streams, "watts"))
     avg_watts = float(np.mean(watts)) if len(watts) else 0.0
     np_val = calculate_normalized_power(watts) if len(watts) else 0
@@ -108,7 +108,7 @@ def build_ride(act, streams, user_id, ftp, max_hr) -> dict:
     tss, source = ride_tss(moving_time_sec, np_val, ftp, avg_hr, max_hr)
     return {
         "id": act.id,
-        "user_id": user_id,
+        "athlete_id": athlete_id,
         "start_date": act.start_date.isoformat(),
         # Strava's local wall-clock time; days are assigned by this, not by UTC.
         "start_date_local": act.start_date_local.replace(tzinfo=None).isoformat(),
@@ -130,45 +130,52 @@ def build_ride(act, streams, user_id, ftp, max_hr) -> dict:
     }
 
 
+def save_ride(ride: dict) -> None:
+    columns = ", ".join(ride)
+    db.execute(
+        f"INSERT OR REPLACE INTO activities ({columns}) VALUES ({', '.join('?' * len(ride))})",
+        ride.values(),
+    )
+
+
 # --- 2. SYNC ---
 
-def _lock_for(user_id: str) -> threading.Lock:
+def _lock_for(athlete_id: int) -> threading.Lock:
     with _locks_guard:
-        return _sync_locks.setdefault(user_id, threading.Lock())
+        return _sync_locks.setdefault(athlete_id, threading.Lock())
 
 
-def backfill_missing_activities(user_id: str, days_back: int = 90) -> int | None:
+def backfill_missing_activities(athlete_id: int, days_back: int = 90) -> int | None:
     """Imports every cycling activity of the last `days_back` days that is not stored yet.
 
-    Returns the number of new rides, or None if a sync for this user is already running.
+    Returns the number of new rides, or None if a sync for this athlete is already running.
     """
-    lock = _lock_for(user_id)
+    lock = _lock_for(athlete_id)
     if not lock.acquire(blocking=False):
-        log.info("Sync for %s already running, skipped", user_id)
+        log.info("Sync for athlete %s already running, skipped", athlete_id)
         return None
     try:
-        return _backfill(user_id, days_back)
+        return _backfill(athlete_id, days_back)
     finally:
         lock.release()
 
 
-def _backfill(user_id: str, days_back: int) -> int:
-    db = get_db()
-    profile = db.table("profiles").select("ftp, max_heart_rate").eq("id", user_id).execute().data
-    current_ftp = (profile[0].get("ftp") if profile else None) or 200
-    max_hr = (profile[0].get("max_heart_rate") if profile else None) or 190
-    history = (
-        db.table("athlete_history").select("ftp, valid_from")
-        .eq("user_id", user_id).order("valid_from", desc=True).execute()
-    ).data or []
+def _backfill(athlete_id: int, days_back: int) -> int:
+    profile = db.query_one("SELECT ftp, max_heart_rate FROM athletes WHERE id = ?", [athlete_id]) or {}
+    current_ftp = profile.get("ftp") or 200
+    max_hr = profile.get("max_heart_rate") or 190
+    history = db.query(
+        "SELECT ftp, valid_from FROM ftp_history WHERE athlete_id = ? ORDER BY valid_from DESC",
+        [athlete_id],
+    )
 
-    client = Client(access_token=get_valid_token(user_id))
+    client = Client(access_token=get_valid_token(athlete_id))
     since = datetime.now(UTC) - timedelta(days=days_back)
     existing = {
         row["id"]
-        for row in fetch_all(
-            lambda: db.table("activities").select("id")
-            .eq("user_id", user_id).gte("start_date", since.isoformat()).order("id")
+        for row in db.query(
+            "SELECT id FROM activities WHERE athlete_id = ? AND start_date >= ?",
+            [athlete_id, since.isoformat()],
         )
     }
 
@@ -190,8 +197,8 @@ def _backfill(user_id: str, days_back: int) -> int:
             streams = {}
         time.sleep(STREAM_PAUSE_S)
 
-        db.table("activities").upsert(build_ride(act, streams, user_id, ftp, max_hr)).execute()
+        save_ride(build_ride(act, streams, athlete_id, ftp, max_hr))
         added += 1
 
-    log.info("Strava sync for %s: %d new, %d already stored", user_id, added, skipped)
+    log.info("Strava sync for athlete %s: %d new, %d already stored", athlete_id, added, skipped)
     return added

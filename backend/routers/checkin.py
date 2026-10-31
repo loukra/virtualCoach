@@ -1,21 +1,24 @@
 from fastapi import APIRouter, Depends
 
-from core.auth import current_user_id
+from core import db
+from core.auth import current_athlete
 from core.dates import today
-from core.db import get_db
 from models import CheckInRequest
 
 router = APIRouter()
 
 
 @router.post("/check-in")
-def save_checkin(payload: CheckInRequest, user_id: str = Depends(current_user_id)):
+def save_checkin(payload: CheckInRequest, athlete_id: int = Depends(current_athlete)):
     data = {
-        "user_id": user_id,
         "date": today().isoformat(),
         "feel_score": payload.feel_score,
         "soreness_score": payload.soreness_score,
         "notes": payload.notes,
     }
-    get_db().table("daily_checkins").upsert(data, on_conflict="user_id,date").execute()
+    db.execute(
+        "INSERT OR REPLACE INTO daily_checkins (athlete_id, date, feel_score, soreness_score, notes)"
+        " VALUES (?, ?, ?, ?, ?)",
+        [athlete_id, *data.values()],
+    )
     return {"status": "success", "data": data}

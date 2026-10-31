@@ -41,8 +41,8 @@ TIMELINE
 
 def build_plan(
     *,
-    user_id: str,
-    journey_id: str,
+    athlete_id: int | None,
+    journey_id: str | None,
     goal: str,
     start_date: date,
     race_date: date,
@@ -62,7 +62,7 @@ def build_plan(
         user_input=f"{context}\n\nReturn {-(-total_days // 7)} weeks.",
         schema=MacroPlan,
         validate=lambda m: validate_macro(m, total_days),
-        user_id=user_id,
+        athlete_id=athlete_id,
         journey_id=journey_id,
     )
     week_targets = {w.week_number: w.target_tss for w in macro.weeks}
@@ -94,7 +94,7 @@ def build_plan(
             user_input=user_input,
             schema=PlanBlock,
             validate=lambda b, lo=first, hi=last: validate_days(b.days, lo, hi, total_days, week_targets),
-            user_id=user_id,
+                athlete_id=athlete_id,
             journey_id=journey_id,
         )
         days.extend(block.days)

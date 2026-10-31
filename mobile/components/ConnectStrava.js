@@ -11,10 +11,13 @@ const REDIRECT_URI = Linking.createURL('strava');
 // Random value echoed back by Strava, so the app only accepts a code from its own request.
 const newOAuthState = () => Math.random().toString(36).slice(2) + Date.now().toString(36);
 
-// Note: changed prop name to 'onSyncStarted' to match App.js
-export default function ConnectStrava({ session, onSyncStarted }) {
+export default function ConnectStrava({ failed, onSyncStarted }) {
   const [loading, setLoading] = useState(false);
-  const [statusText, setStatusText] = useState("Connect your account to analyze your history.");
+  const [statusText, setStatusText] = useState(
+    failed
+      ? "The last import did not work. Please connect again."
+      : "Connect your account to analyze your history."
+  );
 
   // --- A. Handle the OAuth Flow ---
   const handleConnect = async () => {

@@ -5,8 +5,8 @@ from datetime import date, timedelta
 
 import numpy as np
 
+from core import db
 from core.dates import today
-from core.db import fetch_all, get_db
 
 log = logging.getLogger(__name__)
 
@@ -56,19 +56,23 @@ def compute_daily_metrics(daily_tss: dict[date, float], end_date: date) -> list[
     return rows
 
 
-def calculate_daily_metrics(user_id: str) -> None:
-    db = get_db()
-    rides = fetch_all(
-        lambda: db.table("activities").select("start_date_local, tss")
-        .eq("user_id", user_id).order("start_date_local")
+def calculate_daily_metrics(athlete_id: int) -> None:
+    rides = db.query(
+        "SELECT start_date_local, tss FROM activities WHERE athlete_id = ? ORDER BY start_date_local",
+        [athlete_id],
     )
     daily_tss: dict[date, float] = {}
     for r in rides:
         day = date.fromisoformat(r["start_date_local"][:10])
         daily_tss[day] = daily_tss.get(day, 0) + (r["tss"] or 0)
 
-    rows = [{"user_id": user_id, **row} for row in compute_daily_metrics(daily_tss, today())]
-    for i in range(0, len(rows), 500):
-        db.table("daily_metrics").upsert(rows[i : i + 500]).execute()
+    rows = compute_daily_metrics(daily_tss, today())
+    with db.transaction() as conn:
+        conn.executemany(
+            "INSERT OR REPLACE INTO daily_metrics"
+            " (athlete_id, date, ctl, atl, tsb, ramp_rate, monotony, strain)"
+            " VALUES (:athlete_id, :date, :ctl, :atl, :tsb, :ramp_rate, :monotony, :strain)",
+            [{"athlete_id": athlete_id, **row} for row in rows],
+        )
     if rows:
-        log.info("Metrics for %s: CTL %.1f, TSB %.1f", user_id, rows[-1]["ctl"], rows[-1]["tsb"])
+        log.info("Metrics for athlete %s: CTL %.1f, TSB %.1f", athlete_id, rows[-1]["ctl"], rows[-1]["tsb"])
