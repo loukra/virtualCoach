@@ -1,22 +1,18 @@
-from fastapi import APIRouter, BackgroundTasks
-from datetime import date
-from models import ConnectRequest
+from fastapi import APIRouter, BackgroundTasks, Depends
+
+from core.auth import current_user_id
 from logic.workers import run_onboarding_process
+from models import ConnectRequest
 
 router = APIRouter()
 
+
 @router.post("/connect-strava")
-async def connect_strava(payload: ConnectRequest, background_tasks: BackgroundTasks):
-    """
-    Receives the Strava Code from the App.
-    Returns immediately, but starts the sync in the background.
-    """
-    # 1. Add the heavy function to the background queue
-    background_tasks.add_task(run_onboarding_process, payload.user_id, payload.code)
-    
-    # 2. Reply instantly to the phone (prevent timeout)
-    return {
-        "message": "Onboarding started", 
-        "user_id": payload.user_id,
-        "status": "processing"
-    }
+def connect_strava(
+    payload: ConnectRequest,
+    background_tasks: BackgroundTasks,
+    user_id: str = Depends(current_user_id),
+):
+    """Receives the Strava OAuth code from the app; token exchange and import run in the background."""
+    background_tasks.add_task(run_onboarding_process, user_id, payload.code)
+    return {"message": "Onboarding started", "status": "processing"}

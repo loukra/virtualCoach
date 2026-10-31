@@ -1,84 +1,62 @@
-from fastapi import APIRouter, BackgroundTasks, HTTPException
-from datetime import date
-from core.db import supabase
-from models import CreateJourneyRequest
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+
+from core.auth import current_user_id
+from core.dates import today
+from core.db import get_db
 from logic.workers import run_ai_plan_generation
+from models import CreateJourneyRequest
 
 router = APIRouter()
 
+MIN_PLAN_DAYS = 7
+MAX_PLAN_DAYS = 365
+
+
 @router.post("/create-journey")
-async def create_journey_endpoint(payload: CreateJourneyRequest, background_tasks: BackgroundTasks):
-    """
-    Creates a journey and triggers AI plan generation in the background.
-    """
-    print(f"🚀 Creating Journey '{payload.journey_name}' for {payload.user_id}")
-    
-    # A. Calculate Days Until Race
-    try:
-# 1. Determine Dates
-        today = date.today()
-    
-        # If user provided a start date, use it. Otherwise default to today.
-        if payload.start_date:
-            macro_start_date = date.fromisoformat(payload.start_date)
-        else:
-            macro_start_date = today
+def create_journey_endpoint(
+    payload: CreateJourneyRequest,
+    background_tasks: BackgroundTasks,
+    user_id: str = Depends(current_user_id),
+):
+    """Creates a journey and generates its plan in the background (status creating -> active)."""
+    day = today()
+    start_date = payload.start_date or day
+    plan_days = (payload.race_date - start_date).days + 1
+    if plan_days < MIN_PLAN_DAYS:
+        raise HTTPException(400, "Race date must be at least 1 week after the start date.")
+    if plan_days > MAX_PLAN_DAYS:
+        raise HTTPException(400, "Plans can cover at most one year.")
+    if payload.race_date < day:
+        raise HTTPException(400, "Race date is in the past.")
 
-        race_date_obj = date.fromisoformat(payload.race_date)
-        days_until = (race_date_obj - macro_start_date).days + 1
-        
-        if days_until < 7:
-            raise HTTPException(status_code=400, detail="Race date must be at least 1 week away.")
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
+    db = get_db()
+    db.table("profiles").update({
+        "ftp": payload.current_ftp,
+        "weight_kg": payload.current_weight,
+    }).eq("id", user_id).execute()
+    # FTP history lets the sync score older rides with the FTP that was valid back then.
+    db.table("athlete_history").upsert(
+        {"user_id": user_id, "valid_from": day.isoformat(), "ftp": payload.current_ftp},
+        on_conflict="user_id,valid_from",
+    ).execute()
 
-    # B. Update User Profile (FTP/Weight)
-    supabase.table("profiles").update({
-        "ftp": payload.current_ftp, 
-        "weight_kg": payload.current_weight
-    }).eq("id", payload.user_id).execute()
+    metrics = (
+        db.table("daily_metrics").select("ctl").eq("user_id", user_id)
+        .order("date", desc=True).limit(1).execute()
+    ).data
+    current_ctl = float(metrics[0]["ctl"]) if metrics else 0.0
 
-
-# --- 👇 NEW LOGIC: FETCH CURRENT CTL ---
-    print(f"🔍 Checking fitness history for {payload.user_id}...")
-    
-    # Query the LAST recorded metric for this user
-    metrics_res = supabase.table("daily_metrics")\
-        .select("ctl")\
-        .eq("user_id", payload.user_id)\
-        .order("date", desc=True)\
-        .limit(1)\
-        .execute()
-    
-    # If they have history, use it. If not, assume 0 (Beginner).
-    current_ctl = 0
-    if metrics_res.data and len(metrics_res.data) > 0:
-        current_ctl = metrics_res.data[0]['ctl']
-        print(f"   -> Found existing fitness: CTL {current_ctl}")
-    else:
-        print("   -> No history found. Starting at CTL 0 (Beginner).")
-    # C. Create Journey Record
-    journey_data = {
-        "user_id": payload.user_id,
+    journey = db.table("journeys").insert({
+        "user_id": user_id,
         "name": payload.journey_name,
-        "start_date": macro_start_date.isoformat(),
-        "race_date": payload.race_date,
-        "status": "creating" # Mark as creating so app knows to wait
-    }
-    res = supabase.table("journeys").insert(journey_data).execute()
-    journey_id = res.data[0]['id']
+        "start_date": start_date.isoformat(),
+        "race_date": payload.race_date.isoformat(),
+        "status": "creating",
+    }).execute().data[0]
 
-    # D. Run AI Generation in Background (So app doesn't freeze)
     background_tasks.add_task(
-        run_ai_plan_generation, 
-        journey_id,
-        payload.journey_name,       # goal
-        payload.current_ftp,        # ftp
-        payload.current_weight,     # weight
-        macro_start_date,           # start_date
-        race_date_obj,              # race_date (Ensure this var exists from step A)
-        date.today(),               # current_date (To know "where we are now")
-        current_ctl                 # current_ctl
+        run_ai_plan_generation,
+        journey["id"], user_id, payload.journey_name, payload.current_ftp, payload.current_weight,
+        start_date, payload.race_date, day, current_ctl,
     )
-
-    return {"status": "processing", "message": "AI is building your plan...", "journey_id": journey_id}
+    return {"status": "processing", "message": "AI is building your plan...", "journey_id": journey["id"]}

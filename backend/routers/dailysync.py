@@ -1,17 +1,18 @@
-from fastapi import APIRouter, BackgroundTasks
-from core.db import supabase
-from models import SyncRequest
+from fastapi import APIRouter, BackgroundTasks, Depends
+
+from core.auth import current_user_id
 from logic.workers import run_sync
+from models import SyncRequest
 
 router = APIRouter()
 
+
 @router.post("/sync")
-async def sync_user(payload: SyncRequest, background_tasks: BackgroundTasks):
-    """
-    Called by the App on startup.
-    Triggers a background update of Strava activities.
-    """
-    # Run in background so the App doesn't wait/freeze
-    background_tasks.add_task(run_sync, payload.user_id, payload.days_back)
-    
+def sync_user(
+    payload: SyncRequest,
+    background_tasks: BackgroundTasks,
+    user_id: str = Depends(current_user_id),
+):
+    """Called by the app on startup; imports new Strava rides in the background."""
+    background_tasks.add_task(run_sync, user_id, payload.days_back)
     return {"status": "queued", "message": "Sync started in background"}

@@ -1,0 +1,113 @@
+"""Structured LLM calls with validation, repair and logging.
+
+Every call: the model fills a Pydantic schema (Structured Outputs), the result is checked by a
+deterministic validator, and on violations the model gets one more chance with the exact
+problems listed. Each attempt is logged to `ai_generations` (model, prompt version, tokens,
+latency, violations) so quality and cost can be followed over time.
+"""
+import hashlib
+import logging
+import time
+from collections.abc import Callable
+from functools import lru_cache
+from pathlib import Path
+
+import openai
+from pydantic import BaseModel
+
+from core.config import get_settings
+from core.db import get_db
+from core.llm import get_openai
+
+log = logging.getLogger(__name__)
+PROMPT_DIR = Path(__file__).resolve().parent.parent / "prompts"
+
+
+class GenerationError(Exception):
+    def __init__(self, kind: str, errors: list[str]):
+        super().__init__(f"{kind} generation failed: {'; '.join(errors)}")
+        self.kind = kind
+        self.errors = errors
+
+
+@lru_cache
+def load_prompt(name: str) -> tuple[str, str]:
+    """Returns the prompt text and a version tag that changes whenever the file changes."""
+    text = (PROMPT_DIR / f"{name}.md").read_text(encoding="utf-8")
+    return text, f"{name}@{hashlib.sha256(text.encode()).hexdigest()[:8]}"
+
+
+def repair_message(errors: list[str]) -> str:
+    listed = "\n".join(f"- {e}" for e in errors)
+    return (
+        "Your previous answer violated these rules:\n"
+        f"{listed}\n"
+        "Return the complete corrected answer in the same format."
+    )
+
+
+def _record(**row) -> None:
+    try:
+        get_db().table("ai_generations").insert(row).execute()
+    except Exception:
+        log.exception("Could not log an AI generation")  # logging must never break a generation
+
+
+def generate_structured[T: BaseModel](
+    *,
+    kind: str,
+    model: str,
+    prompt_name: str,
+    user_input: str,
+    schema: type[T],
+    validate: Callable[[T], list[str]],
+    user_id: str,
+    journey_id: str | None = None,
+    max_output_tokens: int = 32000,
+) -> T:
+    instructions, prompt_version = load_prompt(prompt_name)
+    messages: list[dict] = [{"role": "user", "content": user_input}]
+    errors: list[str] = []
+
+    for attempt in range(1, get_settings().ai_max_attempts + 1):
+        started = time.monotonic()
+        response = None
+        try:
+            response = get_openai().responses.parse(
+                model=model,
+                instructions=instructions,
+                input=messages,
+                text_format=schema,
+                max_output_tokens=max_output_tokens,
+                store=False,  # the athlete's data is not kept on OpenAI's side
+            )
+            parsed = response.output_parsed
+            errors = validate(parsed) if parsed is not None else ["The model refused to answer."]
+        except openai.OpenAIError as e:
+            _record(
+                user_id=user_id, journey_id=journey_id, kind=kind, model=model,
+                prompt_version=prompt_version, attempt=attempt, ok=False,
+                errors=[f"API error: {e}"], latency_ms=int((time.monotonic() - started) * 1000),
+            )
+            raise GenerationError(kind, [f"OpenAI API error: {e}"]) from e
+        except ValueError as e:  # truncated or malformed JSON that does not fit the schema
+            parsed = None
+            errors = [f"The answer was not valid JSON for the schema ({e.__class__.__name__})."]
+
+        usage = getattr(response, "usage", None)
+        _record(
+            user_id=user_id, journey_id=journey_id, kind=kind, model=model,
+            prompt_version=prompt_version, attempt=attempt, ok=not errors, errors=errors,
+            latency_ms=int((time.monotonic() - started) * 1000),
+            input_tokens=getattr(usage, "input_tokens", None),
+            output_tokens=getattr(usage, "output_tokens", None),
+        )
+        if not errors:
+            return parsed
+
+        log.warning("%s attempt %d failed checks: %s", kind, attempt, errors)
+        if response is not None and response.output_text:
+            messages.append({"role": "assistant", "content": response.output_text})
+        messages.append({"role": "user", "content": repair_message(errors)})
+
+    raise GenerationError(kind, errors)

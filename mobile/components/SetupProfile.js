@@ -38,7 +38,7 @@ export default function SetupProfile({ session, onProfileComplete }) {
         goal: answers.goal,
         ftp: parseInt(answers.ftp),
         max_heart_rate: parseInt(answers.max_heart_rate),
-        weight: parseFloat(answers.weight),
+        weight_kg: parseFloat(answers.weight),
         // Important: Mark profile as "filled" so we don't ask again
         has_completed_onboarding: true 
       })

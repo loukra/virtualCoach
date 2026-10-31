@@ -77,14 +77,14 @@ export default function TrainingPlanView() {
         .from('activities')
         .select('*')
         .eq('user_id', session.user.id)
-        .order('start_date', { ascending: false });
+        .order('start_date_local', { ascending: false });
 
       if (targetJourney && targetJourney.start_date) {
-           query = query.gte('start_date', targetJourney.start_date);
+           query = query.gte('start_date_local', targetJourney.start_date);
       } else {
            const ninetyDaysAgo = new Date();
            ninetyDaysAgo.setDate(ninetyDaysAgo.getDate() - 90);
-           query = query.gte('start_date', ninetyDaysAgo.toISOString());
+           query = query.gte('start_date_local', ninetyDaysAgo.toISOString());
       }
       const { data: activities } = await query;
 
@@ -101,7 +101,7 @@ export default function TrainingPlanView() {
             mergedList = masterPlan.map(planItem => {
                 const planDate = planItem.date; 
                 const matchedActivity = activities?.find(act => 
-                    act.start_date && act.start_date.split('T')[0] === planDate
+                    act.start_date_local && act.start_date_local.split('T')[0] === planDate
                 );
                 return {
                     id: planItem.id,

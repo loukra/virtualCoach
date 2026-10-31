@@ -1,22 +1,21 @@
-from fastapi import APIRouter
-from datetime import date
+from fastapi import APIRouter, Depends
+
+from core.auth import current_user_id
+from core.dates import today
+from core.db import get_db
 from models import CheckInRequest
-from core.db import supabase
 
 router = APIRouter()
 
+
 @router.post("/check-in")
-async def save_checkin(payload: CheckInRequest):
-    today = date.today().isoformat()
-    
+def save_checkin(payload: CheckInRequest, user_id: str = Depends(current_user_id)):
     data = {
-        "user_id": payload.user_id,
-        "date": today,
+        "user_id": user_id,
+        "date": today().isoformat(),
         "feel_score": payload.feel_score,
-        "soreness_score": payload.soreness_score
+        "soreness_score": payload.soreness_score,
+        "notes": payload.notes,
     }
-    
-    # 👇 FIX: Explicitly tell Supabase to check 'user_id' and 'date' for conflicts
-    supabase.table("daily_checkins").upsert(data, on_conflict="user_id, date").execute()
-    
+    get_db().table("daily_checkins").upsert(data, on_conflict="user_id,date").execute()
     return {"status": "success", "data": data}

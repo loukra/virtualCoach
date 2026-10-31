@@ -2,7 +2,8 @@ import React, { useEffect, useRef, useState } from 'react';
 import { View, Text, ActivityIndicator, StyleSheet, TouchableOpacity, ScrollView, Alert } from 'react-native';
 import { supabase } from '../lib/supabase';
 import { Ionicons } from '@expo/vector-icons';
-import { API_URL } from '../constants';
+import { apiPost } from '../lib/api';
+import { localDateString } from '../lib/dates';
 import CheckInModal from './CheckInModal';
 import Markdown from 'react-native-markdown-display';
 
@@ -37,7 +38,7 @@ export default function JourneyOverview({ route, navigation }) {
   const loadTodayData = async () => {
     try {
         const { data: { session } } = await supabase.auth.getSession();
-        const today = new Date().toISOString().split('T')[0];
+        const today = localDateString();
 
         // A. Get Check-In
         const { data: checkData } = await supabase
@@ -70,13 +71,13 @@ export default function JourneyOverview({ route, navigation }) {
   const startPolling = () => {
     if (pollingRef.current) return;
     pollingRef.current = setInterval(async () => {
-      const { data } = await supabase.from('journeys').select('status').eq('id', journeyId).maybeSingle();
+      const { data } = await supabase.from('journeys').select('status, error').eq('id', journeyId).maybeSingle();
       if (data && data.status === 'active') {
          clearInterval(pollingRef.current);
          loadJourney();
       } else if (data && data.status === 'failed') {
          clearInterval(pollingRef.current);
-         Alert.alert("Error", "Plan generation failed.");
+         Alert.alert("Error", data.error || "Plan generation failed.");
          setJourney(prev => ({ ...prev, status: 'failed' }));
       }
     }, 3000);
@@ -84,27 +85,15 @@ export default function JourneyOverview({ route, navigation }) {
 
   const handleGenerateWorkout = async (isRedo = false) => {
     setLoadingWorkout(true);
-    const { data: { session } } = await supabase.auth.getSession();
-
     try {
-        const res = await fetch(`${API_URL}/generate-workout`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ 
-                user_id: session.user.id, 
-                journey_id: journeyId,
-                available_time: 60 
-            })
+        const data = await apiPost('/generate-workout', {
+            journey_id: journeyId,
+            available_time: 60,
+            force: isRedo,
         });
-        
-        const data = await res.json();
-        if (res.ok) {
-            setTodaysWorkout(data.workout);
-        } else {
-            Alert.alert("Error", "Failed to generate workout.");
-        }
+        setTodaysWorkout(data.workout);
     } catch (e) {
-        Alert.alert("Network Error", e.message);
+        Alert.alert("Error", e.message);
     } finally {
         setLoadingWorkout(false);
     }

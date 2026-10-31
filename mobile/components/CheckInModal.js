@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
-import { View, Text, Modal, TouchableOpacity, StyleSheet, ActivityIndicator } from 'react-native';
+import { View, Text, Modal, TouchableOpacity, StyleSheet, ActivityIndicator, Alert } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { API_URL } from '../constants';
+import { apiPost } from '../lib/api';
 
 export default function CheckInModal({ visible, onClose, userId, currentValues, onSave }) {
   const [mood, setMood] = useState(3);
@@ -18,19 +18,11 @@ export default function CheckInModal({ visible, onClose, userId, currentValues, 
   const handleSave = async () => {
     setSaving(true);
     try {
-        await fetch(`${API_URL}/check-in`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                user_id: userId,
-                feel_score: mood,
-                soreness_score: legs
-            })
-        });
+        await apiPost('/check-in', { feel_score: mood, soreness_score: legs });
         onSave({ feel_score: mood, soreness_score: legs }); // Update parent state
         onClose();
     } catch (e) {
-        console.error(e);
+        Alert.alert("Check-in not saved", e.message);
     } finally {
         setSaving(false);
     }

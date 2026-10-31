@@ -1,16 +1,28 @@
-import os
-from supabase import create_client, Client
-from dotenv import load_dotenv
+from functools import lru_cache
 
-# Load secrets from .env
-load_dotenv()
+from supabase import Client, create_client
 
-url = os.environ.get("SUPABASE_URL")
-key = os.environ.get("SUPABASE_KEY")
+from core.config import get_settings
 
-if not url or not key:
-    raise ValueError("❌ Error: Missing Supabase credentials in .env file")
+PAGE_SIZE = 1000  # PostgREST returns at most this many rows per request
 
-# Initialize the client
-supabase: Client = create_client(url, key)
-print("Connected to Supabase...")
+
+@lru_cache
+def get_db() -> Client:
+    settings = get_settings()
+    return create_client(settings.supabase_url, settings.supabase_service_key)
+
+
+def fetch_all(build_query) -> list[dict]:
+    """Pages through a query so results beyond PostgREST's row limit are not cut off.
+
+    `build_query` must return a fresh, ordered query builder on every call.
+    """
+    rows: list[dict] = []
+    start = 0
+    while True:
+        page = build_query().range(start, start + PAGE_SIZE - 1).execute().data or []
+        rows.extend(page)
+        if len(page) < PAGE_SIZE:
+            return rows
+        start += PAGE_SIZE

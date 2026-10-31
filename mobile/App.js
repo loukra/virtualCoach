@@ -6,7 +6,7 @@ import { NavigationContainer } from '@react-navigation/native'; // 👈 IMPORT T
 import 'react-native-gesture-handler'; // 👈 REQUIRED FOR DRAWER
 // Components
 import Auth from './components/Auth';
-import ConnectStrava from './components/connectStrava';
+import ConnectStrava from './components/ConnectStrava';
 import SetupProfile from './components/SetupProfile';
 import AppNavigator from './navigation/AppNavigator';
 // Hooks

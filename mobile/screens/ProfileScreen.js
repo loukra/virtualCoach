@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, Alert, ActivityIndicator } from 'react-native';
 import { supabase } from '../lib/supabase';
 import { Ionicons } from '@expo/vector-icons';
-import { API_URL } from '../constants';
+import { apiPost } from '../lib/api';
 
 export default function ProfileScreen() {
   const [loading, setLoading] = useState(false);
@@ -18,25 +18,10 @@ export default function ProfileScreen() {
   const handleSync = async () => {
     try {
       setLoading(true);
-      const { data: { session } } = await supabase.auth.getSession();
-      if (!session) return;
-
-      // Call the new Background Sync Endpoint
-      const res = await fetch(`${API_URL}/sync`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ user_id: session.user.id,
-            days_back: 90
-         }),
-      });
-
-      if (res.ok) {
-        Alert.alert("Sync Started", "Your data is updating in the background. It may take a few seconds to appear.");
-      } else {
-        Alert.alert("Error", "Could not start sync.");
-      }
+      await apiPost('/sync', { days_back: 90 });
+      Alert.alert("Sync Started", "Your data is updating in the background. It may take a few seconds to appear.");
     } catch (e) {
-      Alert.alert("Connection Error", "Check your internet connection.");
+      Alert.alert("Could not start sync", e.message);
     } finally {
       // Simulate a short loading state so the user knows something happened
       setTimeout(() => setLoading(false), 2000);

@@ -10,7 +10,7 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { supabase } from '../lib/supabase';
-import { API_URL } from '../constants'; 
+import { apiPost } from '../lib/api';
 import CreateJourneyModal from '../components/CreateJourneyModal';
 import { useJourney } from '../context/JourneyContext';
 // 👇 IMPORT NAVIGATION HOOK
@@ -27,11 +27,7 @@ export default function Dashboard() {
   useEffect(() => {
     fetchJourneys();
     // Start background sync silently
-    const getSession = async () => {
-        const { data: { session } } = await supabase.auth.getSession();
-        if(session) triggerApiSync(session.user.id);
-    };
-    getSession();
+    triggerApiSync();
   }, []);
 
   const fetchJourneys = async () => {
@@ -48,16 +44,10 @@ export default function Dashboard() {
     setJourneys(data || []);
   };
 
-  const triggerApiSync = async (userId) => {
+  const triggerApiSync = async () => {
     setIsSyncing(true);
-    try { 
-        await fetch(`${API_URL}/sync`, { 
-            method: 'POST', 
-            headers: { 'Content-Type': 'application/json' }, 
-            body: JSON.stringify({ user_id: userId,
-              days_back: 7
-             }) 
-        }); 
+    try {
+        await apiPost('/sync', { days_back: 7 });
     }
     catch (e) {
         console.log(e);

@@ -1,5 +1,5 @@
 // mobile/hooks/useUserOnboarding.js
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { supabase } from '../lib/supabase';
 import { Alert } from 'react-native';
 
@@ -14,6 +14,12 @@ export function useUserOnboarding() {
     syncCompleted: false,
   });
 
+  const pollingRef = useRef(null);
+  const stopPolling = () => {
+    if (pollingRef.current) clearInterval(pollingRef.current);
+    pollingRef.current = null;
+  };
+
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
       setSession(session);
@@ -27,37 +33,34 @@ export function useUserOnboarding() {
       else setLoading(false);
     });
     
-    return () => subscription.unsubscribe();
+    return () => {
+      subscription.unsubscribe();
+      stopPolling();
+    };
   }, []);
 
   const checkUserStatus = async (userId) => {
     setLoading(true);
     try {
-        // 1. Check Strava
-        const { data: stravaData } = await supabase
-            .from('strava_connection')
-            .select('user_id')
-            .eq('user_id', userId)
-            .maybeSingle();
-
-        // 2. Check Profile
+        // Strava tokens are not readable from the app; the backend sets strava_connected.
         const { data: profileData } = await supabase
             .from('profiles')
-            .select('goal, sync_status')
+            .select('goal, sync_status, strava_connected')
             .eq('id', userId)
             .maybeSingle();
 
         const hasGoal = profileData?.goal && profileData.goal.trim().length > 0;
         const isSyncDone = profileData?.sync_status === 'completed';
+        const stravaConnected = !!profileData?.strava_connected;
 
         setStatus({
-            stravaConnected: !!stravaData,
+            stravaConnected,
             profileSetupDone: !!hasGoal,
             syncCompleted: isSyncDone
         });
 
         // Trigger polling if needed
-        if (!!stravaData && hasGoal && !isSyncDone) {
+        if (stravaConnected && hasGoal && !isSyncDone) {
             pollSyncStatus(userId);
         }
     } catch (e) {
@@ -68,15 +71,16 @@ export function useUserOnboarding() {
   };
 
   const pollSyncStatus = (userId) => {
-    const interval = setInterval(async () => {
+    stopPolling();
+    pollingRef.current = setInterval(async () => {
       const { data } = await supabase.from('profiles').select('sync_status').eq('id', userId).single();
-      
+
       if (data?.sync_status === 'completed') {
-        clearInterval(interval);
+        stopPolling();
         setStatus(prev => ({ ...prev, syncCompleted: true }));
       } else if (data?.sync_status === 'failed') {
-        clearInterval(interval);
-        Alert.alert("Sync Error", "Something went wrong.");
+        stopPolling();
+        Alert.alert("Sync Error", "Importing your Strava history failed. Please try again.");
       }
     }, 3000);
   };

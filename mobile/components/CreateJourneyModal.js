@@ -6,7 +6,8 @@ import {
 } from 'react-native';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import { supabase } from '../lib/supabase';
-import { API_URL } from '../constants';
+import { apiPost } from '../lib/api';
+import { localDateString } from '../lib/dates';
 
 export default function CreateJourneyModal({ visible, onClose, onJourneyCreated }) {
   const [name, setName] = useState('');
@@ -40,34 +41,19 @@ export default function CreateJourneyModal({ visible, onClose, onJourneyCreated 
     if (startDate > raceDate) return Alert.alert("Logic Error", "Start date cannot be after the race date.");
 
     setLoading(true);
-    const { data: { session } } = await supabase.auth.getSession();
-    
     try {
-        const response = await fetch(`${API_URL}/create-journey`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                user_id: session.user.id,
-                journey_name: name,
-                race_date: raceDate.toISOString().split('T')[0],
-                // 👇 SEND START DATE TO BACKEND
-                start_date: startDate.toISOString().split('T')[0], 
-                current_ftp: parseInt(ftp),
-                current_weight: parseFloat(weight)
-            })
+        await apiPost('/create-journey', {
+            journey_name: name,
+            race_date: localDateString(raceDate),
+            start_date: localDateString(startDate),
+            current_ftp: parseInt(ftp, 10),
+            current_weight: parseFloat(weight)
         });
-
-        const result = await response.json();
-
-        if (response.ok) {
-            Alert.alert("Success", "AI is building your plan based on your timeline.");
-            onJourneyCreated(); 
-            onClose();
-        } else {
-            Alert.alert("Error", result.detail || "Failed to create journey");
-        }
+        Alert.alert("Success", "AI is building your plan based on your timeline.");
+        onJourneyCreated();
+        onClose();
     } catch (e) {
-        Alert.alert("Error", "Network error: " + e.message);
+        Alert.alert("Error", e.message);
     } finally {
         setLoading(false);
     }
