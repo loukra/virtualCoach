@@ -112,3 +112,21 @@ def test_last_day_must_be_the_race():
     days = week_of_days(1, GOOD_WEEK)
     errors = validate_days(days, 1, 7, total_days=7, week_targets={})
     assert "Day 7 is race day: planned_workout_type must be Race." in errors
+
+
+def test_token_load_for_a_long_day_or_race_is_rejected():
+    # The real model planned a 4-hour Gran Fondo at 65 TSS (IF 0.4): no race is ridden like that.
+    days = week_of_days(1, GOOD_WEEK)
+    days[-1].planned_workout_type, days[-1].planned_duration_min, days[-1].planned_tss = "Race", 240, 65
+    days[2].planned_duration_min, days[2].planned_tss = 180, 30  # three hours "endurance" at 30 TSS
+    errors = validate_days(days, 1, 7, total_days=7, week_targets={})
+    assert any("Day 7: 65 TSS in 240 minutes is too little for a Race day" in e for e in errors)
+    assert any(e.startswith("Day 3:") and "too little" in e for e in errors)
+
+
+def test_block_ranges_never_leave_race_week_alone():
+    from logic.ai_planner import block_ranges
+    assert block_ranges(85) == [(1, 28), (29, 56), (57, 85)]
+    assert block_ranges(70) == [(1, 28), (29, 56), (57, 70)]
+    assert block_ranges(30) == [(1, 30)]
+    assert block_ranges(7) == [(1, 7)]

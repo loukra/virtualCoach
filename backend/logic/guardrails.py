@@ -14,6 +14,9 @@ MAX_DAY_MINUTES = 360
 MAX_DAY_TSS = 450
 # TSS per minute at IF 1.04: anything above cannot be ridden for the whole duration.
 MAX_TSS_PER_MINUTE = 1.8
+# TSS per minute at IF 0.39 (a very easy spin) and IF 0.57 (the easiest pace a race is ridden at).
+MIN_TSS_PER_MINUTE = 0.25
+MIN_RACE_TSS_PER_MINUTE = 0.55
 EASY_TYPES = {"Rest", "Recovery"}
 # Sustained efforts (>= 10 min) above this fraction of FTP are not realistic.
 MAX_SUSTAINED_POWER = 1.05
@@ -84,6 +87,12 @@ def validate_days(
                 errors.append(f"{prefix}: a Rest day has duration 0 and TSS 0.")
         elif d.planned_duration_min < 20 or d.planned_tss <= 0:
             errors.append(f"{prefix}: a training day needs at least 20 minutes and TSS above 0.")
+        floor = MIN_RACE_TSS_PER_MINUTE if d.planned_workout_type == "Race" else MIN_TSS_PER_MINUTE
+        if d.planned_workout_type != "Rest" and d.planned_tss < d.planned_duration_min * floor:
+            errors.append(
+                f"{prefix}: {d.planned_tss} TSS in {d.planned_duration_min} minutes is too little for a"
+                f" {d.planned_workout_type} day; plan at least {round(d.planned_duration_min * floor)} TSS."
+            )
         if d.planned_tss > d.planned_duration_min * MAX_TSS_PER_MINUTE:
             errors.append(
                 f"{prefix}: {d.planned_tss} TSS in {d.planned_duration_min} minutes is not physically"

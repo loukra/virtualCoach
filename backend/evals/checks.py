@@ -88,9 +88,20 @@ def plan_checks(days: list[PlanDay], current_ctl: float) -> list[str]:
         problems.append(f"first week has {weekly_tss[0]} TSS, current fitness suggests about {usual:.0f}")
     if max(weekly_tss) < 1.1 * weekly_tss[0]:
         problems.append("load never builds above the first week")
-    last_seven = sum(d.planned_tss for d in days[-7:])
-    if last_seven > 0.75 * max(weekly_tss):
-        problems.append(f"no taper: the last 7 days have {last_seven} TSS, the peak week {max(weekly_tss)}")
+    race_week = sum(d.planned_tss for d in days[-8:-1])  # the seven days before race day
+    if race_week > 0.75 * max(weekly_tss):
+        problems.append(
+            f"no taper: the week before the race has {race_week} TSS, the peak week {max(weekly_tss)}"
+        )
+    # Nobody should race far longer than they ever trained in the build-up.
+    race = days[-1]
+    if race.planned_workout_type == "Race" and race.planned_duration_min >= 120:
+        build_up = days[-36:-8]  # the four weeks before race week
+        longest = max((d.planned_duration_min for d in build_up), default=0)
+        if longest < race.planned_duration_min * 2 / 3:
+            problems.append(
+                f"longest ride in the build-up is {longest} min, the race {race.planned_duration_min} min"
+            )
     for number, week in enumerate(full_weeks, start=1):
         hard = sum(d.planned_workout_type in HARD_TYPES for d in week)
         if hard > 3:

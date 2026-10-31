@@ -15,6 +15,20 @@ from logic.schemas import MacroPlan, PlanBlock, PlanDay
 BLOCK_DAYS = 28  # a multiple of 7, so no week is split across two calls
 
 
+def block_ranges(total_days: int) -> list[tuple[int, int]]:
+    """Day ranges for the block calls. A tail shorter than a week joins the block before it, so
+    race day is never planned alone, without the long rides that lead up to it."""
+    ranges = []
+    first = 1
+    while first <= total_days:
+        last = min(first + BLOCK_DAYS - 1, total_days)
+        if total_days - last < 7:
+            last = total_days
+        ranges.append((first, last))
+        first = last + 1
+    return ranges
+
+
 def athlete_level(ctl: float) -> str:
     if ctl >= 110:
         return "Elite / Pro"
@@ -25,13 +39,17 @@ def athlete_level(ctl: float) -> str:
     return "Recreational / Beginner"
 
 
-def plan_context(goal, start_date, race_date, current_date, ftp, weight, ctl) -> str:
+def plan_context(goal, start_date, race_date, current_date, ftp, weight, ctl, longest_ride_min=None) -> str:
     total_days = (race_date - start_date).days + 1
     days_elapsed = max(0, (current_date - start_date).days + 1)
+    longest = (
+        f"{longest_ride_min} minutes" if longest_ride_min else "unknown (no ride history)"
+    )
     return f"""ATHLETE
 - Goal (athlete's own words): {json.dumps(goal)}
 - FTP: {ftp} W, weight: {weight} kg
 - Current CTL: {ctl:.0f} ({athlete_level(ctl)})
+- Longest ride in the last 90 days: {longest}
 
 TIMELINE
 - Plan start (day 1): {start_date.isoformat()} ({start_date.strftime('%A')})
@@ -50,10 +68,13 @@ def build_plan(
     ftp: int,
     weight: float,
     current_ctl: float,
+    longest_ride_min: int | None = None,
 ) -> list[PlanDay]:
     settings = get_settings()
     total_days = (race_date - start_date).days + 1
-    context = plan_context(goal, start_date, race_date, current_date, ftp, weight, current_ctl)
+    context = plan_context(
+        goal, start_date, race_date, current_date, ftp, weight, current_ctl, longest_ride_min
+    )
 
     macro = generate_structured(
         kind="plan_macro",
@@ -71,8 +92,7 @@ def build_plan(
     )
 
     days: list[PlanDay] = []
-    for first in range(1, total_days + 1, BLOCK_DAYS):
-        last = min(first + BLOCK_DAYS - 1, total_days)
+    for first, last in block_ranges(total_days):
         calendar = "\n".join(
             f"- Day {n}: {(start_date + timedelta(days=n - 1)).strftime('%a %Y-%m-%d')}"
             for n in range(first, last + 1)

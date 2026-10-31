@@ -110,7 +110,7 @@ def run_plan_scenario() -> dict:
         days = build_plan(
             athlete_id=None, journey_id=None, goal="Gran Fondo, 160 km with 1800 m climbing",
             start_date=start_date, race_date=start_date + timedelta(days=69),
-            current_date=start_date, ftp=250, weight=75, current_ctl=PLAN_CTL,
+            current_date=start_date, ftp=250, weight=75, current_ctl=PLAN_CTL, longest_ride_min=180,
         )
         problems = [] if len(days) == 70 else [f"{len(days)} days instead of 70"]
         problems += plan_checks(days, PLAN_CTL)

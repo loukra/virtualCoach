@@ -26,10 +26,15 @@ def run_ai_plan_generation(
     current_ctl: float,
 ) -> None:
     try:
+        longest = db.query_one(
+            "SELECT MAX(moving_time) AS s FROM activities WHERE athlete_id = ? AND start_date_local >= ?",
+            [athlete_id, (current_date - timedelta(days=90)).isoformat()],
+        )
         days = build_plan(
             athlete_id=athlete_id, journey_id=journey_id, goal=goal, start_date=start_date,
             race_date=race_date, current_date=current_date, ftp=ftp, weight=weight,
             current_ctl=current_ctl,
+            longest_ride_min=round(longest["s"] / 60) if longest and longest["s"] else None,
         )
         rows = [
             (

@@ -115,3 +115,17 @@ def test_runner_repeats_scenarios_and_writes_a_report(fake_models, monkeypatch):
     assert report["summary"]["sweet_spot_day"] == {"runs": 2, "passed": 2, "first_try": 2, "tokens": 2400}
     assert report["prompts"]["workout"].startswith("workout@")
     assert report["results"][0]["workout"]["name"] == "Sweet Spot 3x10"
+
+
+def test_race_far_longer_than_any_build_up_ride_is_flagged():
+    days = week(60) + week(70) + week(80) + week(90) + week(95) + week(40)
+    days[-1] = PlanDay(day_number=0, phase="Race", planned_workout_type="Race",
+                       planned_duration_min=300, planned_tss=220, description="Race.")
+    assert any("longest ride in the build-up is 60 min" in p for p in plan_checks(days, current_ctl=55))
+
+
+def test_race_day_itself_does_not_count_against_the_taper():
+    taper = week(60) + week(80) + week(90) + week(30)
+    taper[-1] = PlanDay(day_number=0, phase="Race", planned_workout_type="Race",
+                        planned_duration_min=330, planned_tss=232, description="Race.")
+    assert not any(p.startswith("no taper") for p in plan_checks(taper, current_ctl=25))
