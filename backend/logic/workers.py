@@ -1,101 +1,242 @@
-from datetime import timedelta
-from core.db import supabase
-from auth import exchange_code_for_token
-from sync import backfill_missing_activities
-from analysis import calculate_daily_metrics
-from logic.ai_planner import generate_ai_plan_logic
+"""Background jobs. Each reports its outcome in the database so the app can poll for it."""
+import logging
+from datetime import date, timedelta
 
-def run_ai_plan_generation(journey_id, goal, ftp, weight, start_date, race_date, current_date, current_ctl):
-    """
-    Background worker that calls the AI and saves the result to the DB.
-    """
-    # Calculate days just for the log message
-    days_count = (race_date - start_date).days + 1
-    print(f"🧠 [AI Worker] Generating {days_count} day plan for Journey {journey_id}...")
-    
-    # 1. Call OpenAI with the specific Dates
-    plan_json = generate_ai_plan_logic(goal, start_date, race_date, current_date, ftp, weight, current_ctl) 
-    
-    if not plan_json:
-        supabase.table("journeys").update({"status": "failed"}).eq("id", journey_id).execute()
-        return
+from stravalib import exc as strava_exc
 
-    # 2. Prepare Rows for Database
-    plan_rows = []
+from core import db
+from core.dates import monday_of, today
+from logic.ai import GenerationError
+from logic.ai_planner import build_plan
+from logic.events import load_events
+from logic.metrics import calculate_daily_metrics
+from logic.schemas import PlanDay
+from logic.sessions import match_athlete_rides
+from logic.strava_auth import exchange_code_for_token
+from logic.strava_sync import backfill_missing_activities
+
+log = logging.getLogger(__name__)
+
+
+def latest_race_before(athlete_id: int, journey_id: str, start_date: date) -> date | None:
+    """A race in the four days before a plan starts (the end of a race journey, or a race event)."""
+    window = [(start_date - timedelta(days=4)).isoformat(), (start_date - timedelta(days=1)).isoformat()]
+    row = db.query_one(
+        "SELECT MAX(d) AS d FROM ("
+        " SELECT race_date AS d FROM journeys WHERE athlete_id = ? AND id != ? AND goal_type = 'race'"
+        "  AND status != 'archived' AND race_date BETWEEN ? AND ?"
+        " UNION ALL SELECT start_date FROM events WHERE athlete_id = ? AND kind = 'race'"
+        "  AND start_date BETWEEN ? AND ?)",
+        [athlete_id, journey_id, *window, athlete_id, *window],
+    )
+    return date.fromisoformat(row["d"]) if row["d"] else None
+
+
+def longest_ride_min(athlete_id: int, current_date: date) -> int | None:
+    row = db.query_one(
+        "SELECT MAX(moving_time) AS s FROM activities WHERE athlete_id = ? AND start_date_local >= ?",
+        [athlete_id, (current_date - timedelta(days=90)).isoformat()],
+    )
+    return round(row["s"] / 60) if row and row["s"] else None
+
+
+def plan_rows(journey_id: str, start_date: date, days: list[PlanDay]) -> list[tuple]:
+    return [
+        (
+            journey_id,
+            (start_date + timedelta(days=d.day_number - 1)).isoformat(),
+            d.day_number, d.phase, d.planned_workout_type, d.planned_duration_min,
+            d.planned_tss, d.description,
+        )
+        for d in days
+    ]
+
+
+INSERT_PLAN = (
+    "INSERT INTO master_plan (journey_id, date, day_number, phase, planned_workout_type,"
+    " planned_duration_min, planned_tss, description) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+)
+
+
+def run_ai_plan_generation(
+    journey_id: str,
+    athlete_id: int,
+    goal: str,
+    ftp: int,
+    weight: float,
+    start_date: date,
+    race_date: date,
+    current_date: date,
+    current_ctl: float,
+    goal_type: str = "race",
+) -> None:
     try:
-        for day_obj in plan_json:
-            # Calculate the actual calendar date: Start Date + (Day Number - 1)
-            day_offset = day_obj['day_number'] - 1
-            actual_date = start_date + timedelta(days=day_offset)
-            
-            plan_rows.append({
-                "journey_id": journey_id,
-                "date": actual_date.isoformat(),
-                "day_number": day_obj['day_number'],
-                "phase": day_obj.get('phase', 'Build'),
-                "planned_workout_type": day_obj.get('planned_workout_type', 'Rest'),
-                "planned_duration_min": day_obj.get('planned_duration_min', 0),
-                "planned_tss": day_obj.get('planned_tss', 0),
-                "description": day_obj.get('description', '')
-            })
+        days = build_plan(
+            athlete_id=athlete_id, journey_id=journey_id, goal=goal, start_date=start_date,
+            race_date=race_date, current_date=current_date, ftp_watts=ftp, weight=weight,
+            current_ctl=current_ctl, goal_type=goal_type,
+            # A plan that starts right after a race opens easy.
+            after_race=latest_race_before(athlete_id, journey_id, start_date),
+            longest_ride_min=longest_ride_min(athlete_id, current_date),
+            events=load_events(athlete_id, start_date, race_date),
+        )
+        rows = plan_rows(journey_id, start_date, days)
+        with db.transaction() as conn:  # the plan appears complete or not at all
+            conn.executemany(INSERT_PLAN, rows)
+            conn.execute("UPDATE journeys SET status = 'active', error = NULL WHERE id = ?", [journey_id])
+        log.info("Plan with %d days saved for journey %s", len(rows), journey_id)
+    except GenerationError as e:
+        log.error("Plan generation failed for journey %s: %s", journey_id, e.errors)
+        _fail_journey(journey_id, "The AI could not produce a valid plan. Please try again.")
+    except Exception:
+        log.exception("Plan generation crashed for journey %s", journey_id)
+        _fail_journey(journey_id, "Plan generation failed unexpectedly.")
+    replan_if_pending(journey_id)
 
-        # 3. Batch Insert
-        print(f"   -> Saving {len(plan_rows)} workouts to database...")
-        for k in range(0, len(plan_rows), 100):
-            supabase.table("master_plan").insert(plan_rows[k:k+100]).execute()
-            
-        # 4. Mark Journey as Active
-        supabase.table("journeys").update({"status": "active"}).eq("id", journey_id).execute()
-        print(f"✅ [AI Worker] Plan saved successfully for Journey {journey_id}")
-        
-    except Exception as e:
-        print(f"❌ [AI Worker] Database Error: {e}")
-        supabase.table("journeys").update({"status": "failed"}).eq("id", journey_id).execute()
 
-def run_onboarding_process(user_id: str, code: str):
-    """
-    This runs in the background. It connects Strava, downloads history,
-    and marks the profile as 'ready'.
-    """
-    print(f"⏳ [Background] Starting full onboarding for {user_id}...")
-    
-    # A. Update DB Status -> 'syncing'
-    # (This lets the App know to keep showing the loading spinner)
-    supabase.table("profiles").update({"sync_status": "syncing"}).eq("id", user_id).execute()
+def replan_from(day: date) -> date:
+    """Plans change from the coming Monday: the current week stays as the athlete knows it."""
+    return monday_of(day) + timedelta(days=7)
 
+
+def request_replan(journey_id: str) -> str:
+    """Marks an active journey for a rebuild after its events changed. Returns 'replanning' when
+    the caller should run replan_journey now, 'queued' when a running generation picks it up."""
+    if db.execute(
+        "UPDATE journeys SET replanning = 1, replan_pending = 0, error = NULL"
+        " WHERE id = ? AND status = 'active' AND replanning = 0",
+        [journey_id],
+    ):
+        return "replanning"
+    db.execute("UPDATE journeys SET replan_pending = 1 WHERE id = ? AND status IN ('creating', 'active')",
+               [journey_id])
+    return "queued"
+
+
+def replan_if_pending(journey_id: str) -> None:
+    row = db.query_one("SELECT replan_pending FROM journeys WHERE id = ?", [journey_id])
+    if row and row["replan_pending"] and request_replan(journey_id) == "replanning":
+        replan_journey(journey_id)
+
+
+def replan_journey(journey_id: str) -> None:
+    """Rebuilds an active plan from next Monday on, around the athlete's current events. The weeks
+    before stay; the old plan stays in use until the new one is saved."""
+    journey = db.query_one("SELECT * FROM journeys WHERE id = ?", [journey_id])
+    start, end = date.fromisoformat(journey["start_date"]), date.fromisoformat(journey["race_date"])
+    athlete_id = journey["athlete_id"]
+    first = max(replan_from(today()), monday_of(start) + timedelta(days=7))
     try:
-        # B. Exchange Code for Access Keys
-        print(f"   -> Exchanging OAuth Code...")
-        auth_success = exchange_code_for_token(user_id, code)
-        
-        if not auth_success:
-            raise Exception("Strava Token Exchange Failed")
-
-        # C. Download History (The slow part)
-        print(f"   -> Fetching History...")
-        backfill_missing_activities(user_id, days_back=90)
-        calculate_daily_metrics(user_id)
-
-        # E. Update DB Status -> 'completed'
-        supabase.table("profiles").update({"sync_status": "completed"}).eq("id", user_id).execute()
-        print(f"✅ [Background] Success! User {user_id} is ready.")
-
+        if first <= end:
+            kept = [
+                PlanDay(**row) for row in db.query(
+                    "SELECT day_number, phase, planned_workout_type, planned_duration_min, planned_tss,"
+                    " COALESCE(description, '') AS description FROM master_plan"
+                    " WHERE journey_id = ? AND date < ? ORDER BY date",
+                    [journey_id, first.isoformat()],
+                )
+            ]
+            profile = db.query_one("SELECT ftp, weight_kg FROM athletes WHERE id = ?", [athlete_id]) or {}
+            latest = db.query_one(
+                "SELECT ctl FROM daily_metrics WHERE athlete_id = ? ORDER BY date DESC LIMIT 1", [athlete_id]
+            )
+            days = build_plan(
+                athlete_id=athlete_id, journey_id=journey_id, goal=journey["name"], start_date=start,
+                race_date=end, current_date=today(), ftp_watts=profile.get("ftp") or 200,
+                weight=profile.get("weight_kg") or 75, current_ctl=float(latest["ctl"]) if latest else 0.0,
+                goal_type=journey["goal_type"], longest_ride_min=longest_ride_min(athlete_id, today()),
+                events=load_events(athlete_id, start, end), kept_days=kept,
+            )
+            with db.transaction() as conn:
+                conn.execute("DELETE FROM master_plan WHERE journey_id = ? AND date >= ?",
+                             [journey_id, first.isoformat()])
+                conn.executemany(INSERT_PLAN, plan_rows(journey_id, start, days))
+            log.info("Plan of journey %s rebuilt from %s", journey_id, first)
+        db.execute("UPDATE journeys SET replanning = 0 WHERE id = ?", [journey_id])
     except Exception as e:
-        print(f"❌ [Background] FAILED: {e}")
-        # Update DB Status -> 'failed' so the App can show an error message
-        supabase.table("profiles").update({"sync_status": "failed"}).eq("id", user_id).execute()
+        log.error("Replanning failed for journey %s: %s", journey_id, getattr(e, "errors", e))
+        db.execute(
+            "UPDATE journeys SET replanning = 0, error = ? WHERE id = ?",
+            ["The plan could not be adapted to your events; the previous plan stays. Try again.", journey_id],
+        )
+    replan_if_pending(journey_id)
 
-def run_sync(user_id: str, days_back: int = 7):
-    print(f"🔄 [Background] Syncing daily activities for {user_id}...")
+
+def claim_due_journeys(athlete_id: int, day: date) -> list[dict]:
+    """Scheduled journeys whose start day has come, switched to 'creating' (each by one caller)."""
+    claimed = []
+    for journey in db.query(
+        "SELECT id, name, goal_type, start_date, race_date FROM journeys"
+        " WHERE athlete_id = ? AND status = 'scheduled' AND start_date <= ?",
+        [athlete_id, day.isoformat()],
+    ):
+        if db.execute("UPDATE journeys SET status = 'creating' WHERE id = ? AND status = 'scheduled'",
+                      [journey["id"]]):
+            claimed.append({**journey, "athlete_id": athlete_id})
+    return claimed
+
+
+def generate_scheduled_plan(journey: dict) -> None:
+    """The plan of a journey created ahead of time, from the athlete's fitness and FTP of today."""
+    athlete_id = journey["athlete_id"]
+    profile = db.query_one("SELECT ftp, weight_kg FROM athletes WHERE id = ?", [athlete_id]) or {}
+    latest = db.query_one(
+        "SELECT ctl FROM daily_metrics WHERE athlete_id = ? ORDER BY date DESC LIMIT 1", [athlete_id]
+    )
+    run_ai_plan_generation(
+        journey["id"], athlete_id, journey["name"], profile.get("ftp") or 200, profile.get("weight_kg") or 75,
+        date.fromisoformat(journey["start_date"]), date.fromisoformat(journey["race_date"]), today(),
+        float(latest["ctl"]) if latest else 0.0, journey["goal_type"],
+    )
+
+
+def _fail_journey(journey_id: str, message: str) -> None:
+    db.execute("UPDATE journeys SET status = 'failed', error = ? WHERE id = ?", [message, journey_id])
+
+
+def _set_sync_status(athlete_id: int, status: str, error: str | None = None) -> None:
+    db.execute(
+        "UPDATE athletes SET sync_status = ?, sync_error = ? WHERE id = ?", [status, error, athlete_id]
+    )
+
+
+def sync_error_message(e: Exception) -> str:
+    """What the athlete should know and do; the details stay in the server log."""
+    if isinstance(e, strava_exc.ApplicationInactive):
+        return ("Strava has deactivated the API app: its owner needs a Strava subscription."
+                " Reactivate the app at strava.com/settings/api, then try again.")
+    if isinstance(e, strava_exc.AccessUnauthorized | strava_exc.AuthError):
+        return "Strava no longer accepts the connection. Please connect Strava again."
+    if isinstance(e, strava_exc.RateLimitExceeded | strava_exc.RateLimitTimeout):
+        return "Strava's request limit is reached. Try again in 15 minutes."
+    return "The Strava import failed. Try again later."
+
+
+def run_onboarding_process(athlete_id: int, code: str) -> None:
+    """Connects Strava, downloads 90 days of history and marks the profile as ready."""
+    _set_sync_status(athlete_id, "syncing")
     try:
-        # 1. Fetch only recent history (last 3 days is enough for daily)
-        backfill_missing_activities(user_id, days_back)
-        
-        # 2. Recalculate metrics
-        calculate_daily_metrics(user_id)
-        
-        print(f"✅ [Background] Sync complete for {user_id}")
+        if not exchange_code_for_token(athlete_id, code):
+            raise strava_exc.AuthError("Strava token exchange failed")
+        backfill_missing_activities(athlete_id, days_back=90)
+        calculate_daily_metrics(athlete_id)
+        match_athlete_rides(athlete_id)
+        _set_sync_status(athlete_id, "completed")
     except Exception as e:
-        print(f"❌ [Background] Sync failed: {e}")
-      
+        log.exception("Onboarding failed for athlete %s", athlete_id)
+        _set_sync_status(athlete_id, "failed", sync_error_message(e))
 
+
+def run_sync(athlete_id: int, days_back: int = 7) -> None:
+    try:
+        if backfill_missing_activities(athlete_id, days_back) is None:
+            return  # another sync is running and will report the outcome
+        calculate_daily_metrics(athlete_id)
+        match_athlete_rides(athlete_id)
+        _set_sync_status(athlete_id, "completed")
+    except Exception as e:
+        log.exception("Sync failed for athlete %s", athlete_id)
+        _set_sync_status(athlete_id, "failed", sync_error_message(e))
+    # Fitness is as fresh as it gets right after a sync: the moment to build a plan that starts today.
+    for journey in claim_due_journeys(athlete_id, today()):
+        generate_scheduled_plan(journey)

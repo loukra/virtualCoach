@@ -1,0 +1,13 @@
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: /backend
+    schedule: { interval: monthly }
+  - package-ecosystem: npm
+    directory: /mobile
+    schedule: { interval: monthly }
+    groups:
+      expo: { patterns: ["expo*", "@expo/*", "react-native*", "@react-native*"] }
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: { interval: monthly }

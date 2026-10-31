@@ -1,0 +1,315 @@
+"""Deterministic checks on everything the LLM returns.
+
+Each check returns a list of violations in plain language. An empty list means the output
+may be used; otherwise the violations go back to the model as a repair request
+(logic.ai.generate_structured). The rules are deliberately coarse: they catch unsafe or
+broken plans, not stylistic preferences.
+"""
+from collections import Counter
+from collections.abc import Collection, Sequence
+
+from core.dates import plan_week
+from logic.events import DURATION_TOLERANCE, PlanEvents
+from logic.ftp import TEST_DURATION_MIN, TEST_TSS
+from logic.schemas import MacroPlan, PlanDay, PlanWeek, Workout
+from logic.workout_math import max_power, step_segments, total_duration_s
+
+MAX_DAY_MINUTES = 360
+MAX_DAY_TSS = 450
+# TSS per minute at IF 1.04: anything above cannot be ridden for the whole duration.
+MAX_TSS_PER_MINUTE = 1.8
+# TSS per minute at IF 0.39 (a very easy spin) and IF 0.57 (the easiest pace a race is ridden at).
+MIN_TSS_PER_MINUTE = 0.25
+MIN_RACE_TSS_PER_MINUTE = 0.55
+EASY_TYPES = {"Rest", "Recovery"}
+# Sustained efforts (>= 10 min) above this fraction of FTP are not realistic.
+MAX_SUSTAINED_POWER = 1.05
+# Upper bound for any target, incl. short sprints.
+MAX_POWER = 2.0
+RECOVERY_MAX_POWER = 0.75
+
+
+def build_peak_tss(ctl: float, weeks: int, share: float = 1.0) -> int:
+    """Peak weekly load of a fitness block: fitness (CTL) rising about one point per week.
+
+    A week at a steady CTL carries about 7 × CTL TSS; `share` 0.8 gives the lower bound.
+    """
+    return round(7 * (ctl + share * weeks))
+
+
+def week_lengths(total_days: int, offset: int) -> Counter:
+    """Plan days per calendar week: the first and last week may be short."""
+    return Counter(plan_week(n, offset) for n in range(1, total_days + 1))
+
+
+def default_events(total_days: int, goal_type: str, offset: int) -> PlanEvents:
+    """No events given: a race plan still ends with its main race."""
+    ev = PlanEvents(offset=offset)
+    if goal_type == "race":
+        ev.races[total_days] = {"name": "the race", "duration_min": None, "priority": "A"}
+    return ev
+
+
+def validate_macro(
+    macro: MacroPlan, total_days: int, goal_type: str = "race", ctl: float | None = None, offset: int = 0,
+    events: PlanEvents | None = None, fixed: Sequence[PlanWeek] = (),
+) -> list[str]:
+    """`fixed` are the weeks already planned when a plan is rebuilt: the model returns the rest,
+    and only problems it can still change are reported."""
+    errors: list[str] = []
+    ev = events or default_events(total_days, goal_type, offset)
+    expected = plan_week(total_days, offset)
+    lengths = week_lengths(total_days, offset)
+    kept = len(fixed)
+    if [w.week_number for w in macro.weeks] != list(range(kept + 1, expected + 1)):
+        if not kept:
+            return [f"Return exactly {expected} weeks numbered 1 to {expected}."]
+        return [f"Return only the weeks {kept + 1} to {expected}; weeks 1 to {kept} are already planned."]
+    weeks = [*fixed, *macro.weeks]
+
+    for w in macro.weeks:
+        if not 0 <= w.target_tss <= 1500:
+            errors.append(f"Week {w.week_number}: target_tss {w.target_tss} is outside 0-1500.")
+
+    def per_week(w):  # a short week's load scaled to seven days, so short weeks compare fairly
+        return w.target_tss * 7 / lengths[w.week_number]
+
+    if not kept and lengths[1] < 7 and weeks[0].target_tss > ((ctl or 0) * 7 + 60) * lengths[1] / 7 + 30:
+        errors.append(
+            f"Week 1 has only {lengths[1]} days: plan load for those days only, at most"
+            f" about {round(((ctl or 0) * 7 + 60) * lengths[1] / 7)} TSS."
+        )
+    # Compared with the strongest of the last four weeks: returning to the build level after a
+    # recovery week is normal, only going clearly beyond it is a jump.
+    for i, cur in enumerate(weeks[1:], start=1):
+        if i < kept:
+            continue
+        ref = max(weeks[max(0, i - 4) : i], key=per_week)
+        if per_week(cur) > per_week(ref) * 1.25 + 60:
+            errors.append(
+                f"Week {cur.week_number}: load jumps to {cur.target_tss} TSS from at most"
+                f" {ref.target_tss} in the weeks before; keep increases at or below about 25 %."
+            )
+
+    main_weeks = ev.main_race_weeks
+    if goal_type == "build":
+        allowed = set(main_weeks) | {w - 1 for w in main_weeks}
+        if any(w.phase in ("Race", "Taper") and w.week_number not in allowed for w in macro.weeks):
+            errors.append(
+                "This plan builds fitness: use Race or Taper only in a main race week and the week"
+                " before it." if main_weeks
+                else "This plan builds fitness without a race: use no Race or Taper weeks."
+            )
+        least = build_peak_tss(ctl, expected, 0.8) if ctl is not None and expected >= 8 else 0
+        if max(w.target_tss for w in weeks) < least:
+            errors.append(
+                f"The load never rises enough to raise fitness: let the build weeks grow to a peak"
+                f" of about {build_peak_tss(ctl, expected)} TSS (at least {least})."
+            )
+    elif weeks[-1].phase not in ("Race", "Taper"):
+        errors.append("The last week must be a Race or Taper week.")
+    for number, name in sorted(main_weeks.items()):
+        i = number - 1
+        if i < 3 or number <= kept:
+            continue
+        build = [w.target_tss for w in weeks[i - 3 : i]]
+        if weeks[i].target_tss >= sum(build) / len(build):
+            what = ("Race week" if number == expected and goal_type == "race"
+                    else f"Week {number} (main race \"{name}\")")
+            errors.append(f"{what} load must be below the average of the three weeks before it.")
+
+    for start in range(0, len(weeks) - 4):
+        window = weeks[start : start + 5]
+        if window[-1].week_number <= kept:
+            continue
+        has_easier_week = any(
+            w.phase in ("Recovery", "Taper", "Race") or w.target_tss < p.target_tss
+            for p, w in zip(window, window[1:], strict=False)
+        )
+        if not has_easier_week:
+            errors.append(
+                f"Weeks {window[0].week_number}-{window[-1].week_number} build for five weeks"
+                " without a recovery week; add one."
+            )
+    return errors
+
+
+def validate_days(
+    days: list[PlanDay],
+    first_day: int,
+    last_day: int,
+    total_days: int,
+    week_targets: dict[int, int],
+    goal_type: str = "race",
+    test_days: Collection[int] = (),
+    offset: int = 0,
+    easy_days: int = 0,
+    events: PlanEvents | None = None,
+) -> list[str]:
+    errors: list[str] = []
+    ev = events or default_events(total_days, goal_type, offset)
+    for n in range(1, easy_days + 1):
+        ev.easy.setdefault(n, "the race just before this plan")
+    if [d.day_number for d in days] != list(range(first_day, last_day + 1)):
+        return [f"Return exactly the days {first_day} to {last_day}, one entry per day, in order."]
+    by_number = {d.day_number: d for d in days}
+
+    for d in days:
+        prefix = f"Day {d.day_number}"
+        if not 0 <= d.planned_duration_min <= MAX_DAY_MINUTES:
+            errors.append(f"{prefix}: duration must be 0-{MAX_DAY_MINUTES} minutes.")
+        if not 0 <= d.planned_tss <= MAX_DAY_TSS:
+            errors.append(f"{prefix}: TSS must be 0-{MAX_DAY_TSS}.")
+        if d.planned_workout_type == "Rest":
+            if d.planned_duration_min or d.planned_tss:
+                errors.append(f"{prefix}: a Rest day has duration 0 and TSS 0.")
+        elif d.planned_duration_min < 20 or d.planned_tss <= 0:
+            errors.append(f"{prefix}: a training day needs at least 20 minutes and TSS above 0.")
+        floor = MIN_RACE_TSS_PER_MINUTE if d.planned_workout_type == "Race" else MIN_TSS_PER_MINUTE
+        if d.planned_workout_type != "Rest" and d.planned_tss < d.planned_duration_min * floor:
+            errors.append(
+                f"{prefix}: {d.planned_tss} TSS in {d.planned_duration_min} minutes is too little for a"
+                f" {d.planned_workout_type} day; plan at least {round(d.planned_duration_min * floor)} TSS."
+            )
+        if d.planned_tss > d.planned_duration_min * MAX_TSS_PER_MINUTE:
+            errors.append(
+                f"{prefix}: {d.planned_tss} TSS in {d.planned_duration_min} minutes is not physically"
+                " possible; lower the TSS or extend the duration."
+            )
+
+    errors += event_day_errors(days, ev)
+    for d in days:
+        if d.planned_workout_type == "FTP Test" and d.day_number not in test_days:
+            errors.append(f"Day {d.day_number}: FTP Test only on the days listed under FTP TESTS.")
+    for n in test_days:
+        test = by_number.get(n)
+        if test is None:
+            continue
+        if (test.planned_workout_type, test.planned_duration_min, test.planned_tss) != (
+            "FTP Test", TEST_DURATION_MIN, TEST_TSS
+        ):
+            errors.append(
+                f"Day {n}: FTP Test with {TEST_DURATION_MIN} minutes and {TEST_TSS} TSS, as listed."
+            )
+        before = by_number.get(n - 1)
+        if before is not None and before.planned_workout_type not in EASY_TYPES:
+            errors.append(f"Day {n - 1} is the day before an FTP test: make it Rest or Recovery.")
+
+    by_week: dict[int, list[PlanDay]] = {}
+    for d in days:
+        by_week.setdefault(plan_week(d.day_number, offset), []).append(d)
+    for week, week_days in by_week.items():
+        if len(week_days) < 7:
+            continue  # short first week, or the week of race day
+        days_off = sum(d.day_number in ev.off for d in week_days)
+        if not any(d.planned_workout_type in EASY_TYPES for d in week_days):
+            errors.append(f"Week {week}: include at least one Rest or Recovery day.")
+        target = week_targets.get(week)
+        actual = sum(d.planned_tss for d in week_days)
+        # Days off can leave a week below its target, never above it.
+        if target and (actual - target > target * 0.25 + 30
+                       or (not days_off and target - actual > target * 0.25 + 30)):
+            errors.append(
+                f"Week {week}: days sum to {actual} TSS but the week target is {target};"
+                " stay within about 25 %."
+            )
+    return errors
+
+
+def event_day_errors(days: list[PlanDay], ev: PlanEvents) -> list[str]:
+    """Race days are Race, group rides Endurance, days off Rest, the days around races easy."""
+    errors = []
+
+    def length_error(d: PlanDay, what: str, minutes: int | None) -> str | None:
+        if minutes and abs(d.planned_duration_min - minutes) > minutes * DURATION_TOLERANCE:
+            return f"Day {d.day_number}: {what} lasts about {minutes} minutes; plan the day for that."
+        return None
+
+    for d in days:
+        n, kind = d.day_number, d.planned_workout_type
+        if n in ev.races:
+            race = ev.races[n]
+            if kind != "Race":
+                errors.append(f"Day {n} is race day (\"{race['name']}\"): planned_workout_type must be Race.")
+            elif error := length_error(d, f"the race \"{race['name']}\"", race["duration_min"]):
+                errors.append(error)
+        elif kind == "Race":
+            errors.append(f"Day {n}: Race only on the race days listed under EVENTS."
+                          if ev.races else "This plan has no race: use no Race days.")
+        elif n in ev.rides:
+            ride = ev.rides[n]
+            if kind != "Endurance":
+                errors.append(f"Day {n} is the group ride \"{ride['name']}\": make it Endurance.")
+            elif error := length_error(d, f"the group ride \"{ride['name']}\"", ride["duration_min"]):
+                errors.append(error)
+        elif n in ev.off and kind != "Rest":
+            errors.append(f"Day {n} has no training ({ev.off[n]}): make it Rest.")
+        elif n in ev.easy and kind not in EASY_TYPES | {"Endurance"}:
+            errors.append(f"Day {n} is next to {ev.easy[n]}: make it Rest, Recovery or Endurance.")
+    return errors
+
+
+def validate_workout(
+    workout: Workout,
+    available_min: int,
+    max_hr: int,
+    recovery_only: bool,
+    allow_freeride: bool = False,
+) -> list[str]:
+    errors: list[str] = []
+    if not workout.steps:
+        return ["The workout has no steps."]
+    if workout.steps[0].kind != "warmup":
+        errors.append("Start with a warmup step.")
+    if workout.steps[-1].kind != "cooldown":
+        errors.append("End with a cooldown step.")
+
+    required = {
+        "warmup": ("duration_s", "power_low", "power_high"),
+        "ramp": ("duration_s", "power_low", "power_high"),
+        "cooldown": ("duration_s", "power_low", "power_high"),
+        "steady": ("duration_s", "power"),
+        "intervals": ("repeat", "on_s", "off_s", "on_power", "off_power"),
+        "freeride": ("duration_s",),
+    }
+    for i, step in enumerate(workout.steps, start=1):
+        if step.kind == "freeride" and not allow_freeride:
+            errors.append(f"Step {i}: freeride is only used in FTP tests, which the app builds itself.")
+            continue
+        missing = [f for f in required[step.kind] if not getattr(step, f)]
+        if missing:
+            errors.append(f"Step {i} ({step.kind}): set {', '.join(missing)} to positive values.")
+            continue
+        for sec, lo, hi in step_segments(step):
+            peak = max(lo, hi)
+            if peak > MAX_POWER or min(lo, hi) < 0.3:
+                errors.append(
+                    f"Step {i}: power must be a fraction of FTP between 0.30 and {MAX_POWER}."
+                    " Did you use watts instead of a fraction?"
+                )
+                break
+            if sec >= 600 and peak > MAX_SUSTAINED_POWER:
+                errors.append(
+                    f"Step {i}: {sec // 60} minutes at {peak:.2f} FTP is not sustainable;"
+                    f" efforts of 10+ minutes stay at or below {MAX_SUSTAINED_POWER}."
+                )
+                break
+        if step.hr_cap_bpm is not None and not 90 <= step.hr_cap_bpm <= max_hr:
+            errors.append(f"Step {i}: HR cap must be between 90 and the athlete's max of {max_hr} bpm.")
+
+    if errors:
+        return errors
+
+    minutes = total_duration_s(workout) / 60
+    if minutes > available_min:
+        errors.append(
+            f"The steps add up to {minutes:.0f} minutes but the athlete only has {available_min};"
+            " shorten them."
+        )
+    if minutes < 15:
+        errors.append("The workout must be at least 15 minutes long.")
+    if recovery_only and max_power(workout) > RECOVERY_MAX_POWER:
+        errors.append(
+            f"Today is a forced recovery day: keep every target at or below {RECOVERY_MAX_POWER} FTP."
+        )
+    return errors

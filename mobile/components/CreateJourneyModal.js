@@ -5,17 +5,32 @@ import {
   TouchableWithoutFeedback, Keyboard 
 } from 'react-native';
 import DateTimePicker from '@react-native-community/datetimepicker';
-import { supabase } from '../lib/supabase';
-import { API_URL } from '../constants';
+import { apiGet, apiPost } from '../lib/api';
+import { localDateString, parseLocalDate } from '../lib/dates';
+import { parseNumber, LIMITS, rangeMessage } from '../lib/numbers';
+
+const DEFAULT_PLAN_WEEKS = 12;
+const WEEK_OPTIONS = [8, 12, 16, 20];
+const GOALS = [
+  { key: 'build', label: 'Build fitness', hint: 'Raise your FTP over the coming weeks, with FTP tests to see it work.' },
+  { key: 'race', label: 'Prepare for a race', hint: 'Peak and taper for an event on a fixed date.' },
+];
+
+function weeksFromNow(weeks) {
+  const d = new Date();
+  d.setDate(d.getDate() + weeks * 7);
+  return d;
+}
 
 export default function CreateJourneyModal({ visible, onClose, onJourneyCreated }) {
+  const [goalType, setGoalType] = useState('build');
+  const [weeks, setWeeks] = useState(16);
   const [name, setName] = useState('');
   const [ftp, setFtp] = useState('200');
   const [weight, setWeight] = useState('75');
   
-  // 🗓️ TWO DATES NOW
-  const [raceDate, setRaceDate] = useState(new Date());
-  const [startDate, setStartDate] = useState(new Date()); // Default to Today
+  const [raceDate, setRaceDate] = useState(() => weeksFromNow(DEFAULT_PLAN_WEEKS));
+  const [startDate, setStartDate] = useState(new Date());
   
   // Controls which picker is open: 'race', 'start', or null
   const [activePicker, setActivePicker] = useState(null); 
@@ -26,48 +41,55 @@ export default function CreateJourneyModal({ visible, onClose, onJourneyCreated 
   }, [visible]);
 
   const fetchStats = async () => {
-    const { data: { session } } = await supabase.auth.getSession();
-    if (!session) return;
-    const { data } = await supabase.from('profiles').select('ftp, weight_kg').eq('id', session.user.id).single();
-    if (data) {
-        setFtp(data.ftp ? data.ftp.toString() : '200');
-        setWeight(data.weight_kg ? data.weight_kg.toString() : '75');
+    try {
+        // Journeys follow each other: a new one starts after the last one ends, at the earliest today.
+        const journeys = await apiGet('/journeys');
+        const lastEnd = journeys.map((j) => j.race_date).sort().pop();
+        const dayAfter = lastEnd ? parseLocalDate(lastEnd) : null;
+        if (dayAfter) dayAfter.setDate(dayAfter.getDate() + 1);
+        const start = dayAfter && dayAfter > new Date() ? dayAfter : new Date();
+        setStartDate(start);
+        const race = new Date(start);
+        race.setDate(race.getDate() + DEFAULT_PLAN_WEEKS * 7);
+        setRaceDate(race);
+        const me = await apiGet('/me');
+        setFtp(me.ftp ? me.ftp.toString() : '200');
+        setWeight(me.weight_kg ? me.weight_kg.toString() : '75');
+    } catch (e) {
+        console.log('Could not load profile:', e.message);
     }
   };
 
   const handleCreate = async () => {
-    if (!name) return Alert.alert("Missing Info", "Please enter a name for your goal.");
-    if (startDate > raceDate) return Alert.alert("Logic Error", "Start date cannot be after the race date.");
+    const isRace = goalType === 'race';
+    const title = name.trim() || (isRace ? '' : `${weeks} weeks of fitness`);
+    if (!title) return Alert.alert("Missing info", "Please enter the name of your race.");
+    const days = Math.round((raceDate - startDate) / 86400000);
+    if (isRace && days < 6) return Alert.alert("Check the dates", "The race date must be at least one week after the start date.");
+    const ftpValue = parseNumber(ftp, LIMITS.ftp);
+    if (ftpValue === null) return Alert.alert("Check the value", rangeMessage('ftp'));
+    const weightValue = parseNumber(weight, LIMITS.weight);
+    if (weightValue === null) return Alert.alert("Check the value", rangeMessage('weight'));
 
     setLoading(true);
-    const { data: { session } } = await supabase.auth.getSession();
-    
     try {
-        const response = await fetch(`${API_URL}/create-journey`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                user_id: session.user.id,
-                journey_name: name,
-                race_date: raceDate.toISOString().split('T')[0],
-                // 👇 SEND START DATE TO BACKEND
-                start_date: startDate.toISOString().split('T')[0], 
-                current_ftp: parseInt(ftp),
-                current_weight: parseFloat(weight)
-            })
+        const created = await apiPost('/create-journey', {
+            journey_name: title,
+            goal_type: goalType,
+            ...(isRace ? { race_date: localDateString(raceDate) } : { weeks }),
+            start_date: localDateString(startDate),
+            current_ftp: ftpValue,
+            current_weight: weightValue
         });
-
-        const result = await response.json();
-
-        if (response.ok) {
-            Alert.alert("Success", "AI is building your plan based on your timeline.");
-            onJourneyCreated(); 
-            onClose();
+        if (created.status === 'scheduled') {
+          Alert.alert("Journey scheduled", `Your coach builds the plan on ${startDate.toDateString()}, from your fitness then.`);
         } else {
-            Alert.alert("Error", result.detail || "Failed to create journey");
+          Alert.alert("Plan on the way", "Your coach is building the plan. This takes a minute or two.");
         }
+        onJourneyCreated();
+        onClose();
     } catch (e) {
-        Alert.alert("Error", "Network error: " + e.message);
+        Alert.alert("Error", e.message);
     } finally {
         setLoading(false);
     }
@@ -134,41 +156,71 @@ export default function CreateJourneyModal({ visible, onClose, onJourneyCreated 
             <View style={styles.card}>
               
               <View style={styles.headerRow}>
-                <Text style={styles.title}>New Journey 🎯</Text>
+                <Text style={styles.title}>New Journey</Text>
                 <TouchableOpacity onPress={onClose}><Text style={{color:'#666', fontSize: 20}}>✕</Text></TouchableOpacity>
               </View>
 
-              <Text style={styles.label}>Goal Name</Text>
+              <View style={styles.segment}>
+                {GOALS.map((g) => (
+                  <TouchableOpacity
+                    key={g.key}
+                    style={[styles.segmentBtn, goalType === g.key && styles.segmentActive]}
+                    onPress={() => setGoalType(g.key)}
+                  >
+                    <Text style={[styles.segmentText, goalType === g.key && { color: 'white' }]}>{g.label}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+              <Text style={styles.goalHint}>{GOALS.find((g) => g.key === goalType).hint}</Text>
+
+              <Text style={styles.label}>{goalType === 'race' ? 'Race' : 'Name (optional)'}</Text>
               <TextInput 
                 style={styles.input} 
-                placeholder="e.g. Gran Fondo 2026" 
+                placeholder={goalType === 'race' ? 'e.g. Gran Fondo 2027' : `${weeks} weeks of fitness`}
                 placeholderTextColor="#666"
                 value={name} onChangeText={setName} 
                 returnKeyType="done"
               />
 
-              {/* 🗓️ START DATE (When did you start training?) */}
               <DateInput 
-                 label="Training Start Date (Default: Today)" 
+                 label="Start" 
                  dateValue={startDate} 
                  pickerType="start" 
               />
 
-              {/* 🏁 RACE DATE */}
-              <DateInput 
-                 label="Race / Goal Date" 
-                 dateValue={raceDate} 
-                 pickerType="race" 
-              />
+              {goalType === 'race' ? (
+                <DateInput 
+                   label="Race date" 
+                   dateValue={raceDate} 
+                   pickerType="race" 
+                />
+              ) : (
+                <View style={{ marginBottom: 15 }}>
+                  <Text style={styles.label}>Weeks</Text>
+                  <View style={styles.weekChips}>
+                    {WEEK_OPTIONS.map((w) => (
+                      <TouchableOpacity key={w} style={[styles.weekChip, weeks === w && styles.segmentActive]} onPress={() => setWeeks(w)}>
+                        <Text style={[styles.segmentText, weeks === w && { color: 'white' }]}>{w}</Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                  {startDate.getDay() !== 1 && (
+                    <Text style={styles.goalHint}>
+                      Week 1 runs from {startDate.toLocaleDateString('en-GB', { weekday: 'long' })} to Sunday;
+                      every week after it runs Monday to Sunday.
+                    </Text>
+                  )}
+                </View>
+              )}
 
               <View style={{flexDirection:'row', gap: 10, marginTop: 5}}>
                 <View style={{flex:1}}>
                     <Text style={styles.label}>FTP (W)</Text>
-                    <TextInput style={styles.input} keyboardType="numeric" value={ftp} onChangeText={setFtp} returnKeyType="done" />
+                    <TextInput style={styles.input} keyboardType="number-pad" value={ftp} onChangeText={setFtp} returnKeyType="done" />
                 </View>
                 <View style={{flex:1}}>
                     <Text style={styles.label}>Weight (kg)</Text>
-                    <TextInput style={styles.input} keyboardType="numeric" value={weight} onChangeText={setWeight} returnKeyType="done" />
+                    <TextInput style={styles.input} keyboardType="decimal-pad" value={weight} onChangeText={setWeight} returnKeyType="done" />
                 </View>
               </View>
 
@@ -198,6 +250,13 @@ const styles = StyleSheet.create({
   input: { backgroundColor: '#333', color: 'white', padding: 14, borderRadius: 8, fontSize: 16 },
   dateButton: { backgroundColor: '#333', padding: 14, borderRadius: 8, alignItems:'center' },
   activeInput: { borderWidth: 1, borderColor: '#ff4d4d' }, // Highlight active picker
+  segment: { flexDirection: 'row', backgroundColor: '#333', borderRadius: 10, padding: 3 },
+  segmentBtn: { flex: 1, paddingVertical: 10, borderRadius: 8, alignItems: 'center' },
+  segmentActive: { backgroundColor: '#ff4d4d' },
+  segmentText: { color: '#aaa', fontWeight: 'bold' },
+  goalHint: { color: '#888', fontSize: 12, marginTop: 8, lineHeight: 17 },
+  weekChips: { flexDirection: 'row', gap: 8 },
+  weekChip: { flex: 1, backgroundColor: '#333', paddingVertical: 12, borderRadius: 8, alignItems: 'center' },
   iosPickerContainer: { backgroundColor: '#222', borderRadius: 8, marginTop: 5, overflow: 'hidden' },
   buttons: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 25, alignItems:'center' },
   cancelBtn: { padding: 15 },

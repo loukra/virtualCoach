@@ -1,5 +1,5 @@
 // mobile/constants.js
+// Values come from mobile/.env (see .env.example). Expo inlines EXPO_PUBLIC_* at build time.
 
-// ⚠️ REPLACE THIS with your computer's local IP (run 'ipconfig' or 'ifconfig')
-// Ensure you keep the 'http://' and the port ':8000'
-export const API_URL = 'http://192.168.178.39:8000';
+export const API_URL = process.env.EXPO_PUBLIC_API_URL;
+export const STRAVA_CLIENT_ID = process.env.EXPO_PUBLIC_STRAVA_CLIENT_ID;

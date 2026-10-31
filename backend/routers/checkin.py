@@ -1,22 +1,26 @@
-from fastapi import APIRouter
-from datetime import date
+from fastapi import APIRouter, Depends
+
+from core import db
+from core.auth import current_athlete
+from core.dates import today
 from models import CheckInRequest
-from core.db import supabase
 
 router = APIRouter()
 
+
 @router.post("/check-in")
-async def save_checkin(payload: CheckInRequest):
-    today = date.today().isoformat()
-    
+def save_checkin(payload: CheckInRequest, athlete_id: int = Depends(current_athlete)):
     data = {
-        "user_id": payload.user_id,
-        "date": today,
+        "date": today().isoformat(),
         "feel_score": payload.feel_score,
-        "soreness_score": payload.soreness_score
+        "soreness_score": payload.soreness_score,
+        "motivation_score": payload.motivation_score,
+        "notes": (payload.notes or "").strip() or None,
     }
-    
-    # 👇 FIX: Explicitly tell Supabase to check 'user_id' and 'date' for conflicts
-    supabase.table("daily_checkins").upsert(data, on_conflict="user_id, date").execute()
-    
+    # One check-in per day; checking in again replaces it (feelings change during the day).
+    db.execute(
+        "INSERT OR REPLACE INTO daily_checkins (athlete_id, date, feel_score, soreness_score,"
+        " motivation_score, notes) VALUES (?, ?, ?, ?, ?, ?)",
+        [athlete_id, *data.values()],
+    )
     return {"status": "success", "data": data}

@@ -1,85 +1,109 @@
 import React, { useState, useEffect } from 'react';
-import { View, Text, Modal, TouchableOpacity, StyleSheet, ActivityIndicator } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
-import { API_URL } from '../constants';
+import {
+  View, Text, Modal, TouchableOpacity, StyleSheet, ActivityIndicator, Alert, TextInput,
+  KeyboardAvoidingView, Platform, ScrollView,
+} from 'react-native';
+import { apiPost } from '../lib/api';
+import { colors } from '../theme';
 
-export default function CheckInModal({ visible, onClose, userId, currentValues, onSave }) {
-  const [mood, setMood] = useState(3);
+// Check in as often as you like: a new check-in replaces today's, and the coach reads the
+// last seven days to notice when you are running low.
+export default function CheckInModal({ visible, onClose, currentValues, onSave }) {
+  const [energy, setEnergy] = useState(3);
   const [legs, setLegs] = useState(3);
+  const [motivation, setMotivation] = useState(3);
+  const [notes, setNotes] = useState('');
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    if (visible && currentValues) {
-        setMood(currentValues.feel_score || 3);
-        setLegs(currentValues.soreness_score || 3);
-    }
+    if (!visible) return;
+    setEnergy(currentValues?.feel_score || 3);
+    setLegs(currentValues?.soreness_score || 3);
+    setMotivation(currentValues?.motivation_score || 3);
+    setNotes(currentValues?.notes || '');
   }, [visible, currentValues]);
 
   const handleSave = async () => {
     setSaving(true);
     try {
-        await fetch(`${API_URL}/check-in`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                user_id: userId,
-                feel_score: mood,
-                soreness_score: legs
-            })
-        });
-        onSave({ feel_score: mood, soreness_score: legs }); // Update parent state
-        onClose();
+      const body = { feel_score: energy, soreness_score: legs, motivation_score: motivation, notes };
+      await apiPost('/check-in', body);
+      onSave(body);
+      onClose();
     } catch (e) {
-        console.error(e);
+      Alert.alert('Check-in not saved', e.message);
     } finally {
-        setSaving(false);
+      setSaving(false);
     }
   };
 
-  const RatingRow = ({ label, value, setValue, icon }) => (
-    <View style={{marginBottom: 20}}>
-        <Text style={styles.label}>{label}: {value}/5</Text>
-        <View style={styles.stars}>
-            {[1, 2, 3, 4, 5].map((n) => (
-                <TouchableOpacity key={n} onPress={() => setValue(n)} style={[styles.starBtn, value === n && styles.activeStar]}>
-                    <Text style={{color: value === n ? 'white' : '#666', fontWeight:'bold'}}>{n}</Text>
-                </TouchableOpacity>
-            ))}
-        </View>
-    </View>
-  );
-
   return (
-    <Modal visible={visible} transparent={true} animationType="slide" onRequestClose={onClose}>
-      <View style={styles.overlay}>
+    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
+      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.overlay}>
         <View style={styles.card}>
-            <Text style={styles.title}>Daily Check-In 📝</Text>
-            
-            <RatingRow label="Mood / Energy (1=Worst)" value={mood} setValue={setMood} />
-            <RatingRow label="Leg Soreness (1=Dead)" value={legs} setValue={setLegs} />
+          <ScrollView keyboardShouldPersistTaps="handled">
+            <Text style={styles.title}>How are you right now?</Text>
+
+            <Rating label="Energy" hint="1 = exhausted · 5 = great" value={energy} onChange={setEnergy} />
+            <Rating label="Legs" hint="1 = very sore · 5 = fresh" value={legs} onChange={setLegs} />
+            <Rating label="Motivation" hint="1 = no desire to ride · 5 = can't wait" value={motivation} onChange={setMotivation} />
+
+            <Text style={styles.label}>Anything else?</Text>
+            <TextInput
+              style={styles.notes}
+              value={notes}
+              onChangeText={setNotes}
+              placeholder="Slept badly, stressful week, a cold coming…"
+              placeholderTextColor={colors.textFaint}
+              multiline
+              maxLength={500}
+            />
 
             <TouchableOpacity style={styles.saveBtn} onPress={handleSave} disabled={saving}>
-                {saving ? <ActivityIndicator color="white"/> : <Text style={styles.saveText}>Save Check-In</Text>}
+              {saving ? <ActivityIndicator color="white" /> : <Text style={styles.saveText}>Save</Text>}
             </TouchableOpacity>
-            
             <TouchableOpacity style={styles.closeBtn} onPress={onClose}>
-                <Text style={{color:'#666'}}>Close</Text>
+              <Text style={{ color: colors.textFaint }}>Close</Text>
             </TouchableOpacity>
+          </ScrollView>
         </View>
-      </View>
+      </KeyboardAvoidingView>
     </Modal>
+  );
+}
+
+function Rating({ label, hint, value, onChange }) {
+  return (
+    <View style={{ marginBottom: 18 }}>
+      <Text style={styles.label}>{label}</Text>
+      <Text style={styles.hint}>{hint}</Text>
+      <View style={styles.stars}>
+        {[1, 2, 3, 4, 5].map((n) => (
+          <TouchableOpacity
+            key={n}
+            onPress={() => onChange(n)}
+            style={[styles.starBtn, value === n && styles.activeStar]}
+            accessibilityLabel={`${label} ${n} of 5`}
+          >
+            <Text style={{ color: value === n ? 'white' : colors.textFaint, fontWeight: 'bold' }}>{n}</Text>
+          </TouchableOpacity>
+        ))}
+      </View>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
   overlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.8)', justifyContent: 'center', alignItems: 'center' },
-  card: { backgroundColor: '#1a1a1a', padding: 25, borderRadius: 15, width: '85%' },
-  title: { color: 'white', fontSize: 20, fontWeight: 'bold', marginBottom: 20, textAlign: 'center' },
-  label: { color: '#ccc', marginBottom: 10, fontSize: 16 },
-  stars: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 10 },
-  starBtn: { backgroundColor: '#333', width: 40, height: 40, borderRadius: 20, justifyContent: 'center', alignItems: 'center' },
-  activeStar: { backgroundColor: '#ff4d4d' },
-  saveBtn: { backgroundColor: '#ff4d4d', padding: 15, borderRadius: 8, alignItems: 'center', marginTop: 10 },
-  saveText: { color: 'white', fontWeight: 'bold' },
-  closeBtn: { alignItems: 'center', marginTop: 15 }
+  card: { backgroundColor: colors.card, padding: 25, borderRadius: 15, width: '88%', maxHeight: '85%' },
+  title: { color: colors.text, fontSize: 20, fontWeight: 'bold', marginBottom: 20, textAlign: 'center' },
+  label: { color: '#ccc', fontSize: 16, fontWeight: 'bold' },
+  hint: { color: '#777', fontSize: 12, marginTop: 2, marginBottom: 10 },
+  stars: { flexDirection: 'row', justifyContent: 'space-between' },
+  starBtn: { backgroundColor: colors.input, width: 40, height: 40, borderRadius: 20, justifyContent: 'center', alignItems: 'center' },
+  activeStar: { backgroundColor: colors.accent },
+  notes: { backgroundColor: colors.input, color: colors.text, borderRadius: 8, padding: 12, marginTop: 8, minHeight: 60, textAlignVertical: 'top' },
+  saveBtn: { backgroundColor: colors.accent, padding: 15, borderRadius: 8, alignItems: 'center', marginTop: 20 },
+  saveText: { color: colors.text, fontWeight: 'bold' },
+  closeBtn: { alignItems: 'center', marginTop: 15 },
 });

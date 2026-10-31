@@ -1,0 +1,20 @@
+# Backend for your own server. Put a TLS-terminating reverse proxy (Caddy, nginx) in front:
+# the app sends its access token with every request, so plain HTTP must not leave the host.
+#
+#   docker compose up -d --build
+#   docker compose exec backend python -m manage add-athlete "Louis"
+services:
+  backend:
+    build: ./backend
+    env_file: ./backend/.env
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      # Named volume, so the non-root container user owns it. Backup:
+      #   docker compose exec backend python -c "import sqlite3; sqlite3.connect('data/coach.db').backup(sqlite3.connect('data/backup.db'))"
+      #   docker compose cp backend:/app/data/backup.db ./coach-backup.db
+      - coach-data:/app/data
+
+volumes:
+  coach-data:

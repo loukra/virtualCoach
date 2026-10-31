@@ -2,17 +2,22 @@ import React, { useState } from 'react';
 import { StyleSheet, View, Text, TouchableOpacity, ActivityIndicator, Alert } from 'react-native';
 import * as WebBrowser from 'expo-web-browser';
 import * as Linking from 'expo-linking';
-import { BACKEND_URL } from '../constants'; // 👈 Import from config
-// 1. Configuration
+import { STRAVA_CLIENT_ID } from '../constants';
+import { apiPost } from '../lib/api';
 
-const STRAVA_CLIENT_ID = process.env.EXPO_PUBLIC_STRAVA_CLIENT_ID;
 // This tells Strava to open your app after login
-const REDIRECT_URI = Linking.createURL('/'); 
+const REDIRECT_URI = Linking.createURL('strava');
 
-// Note: changed prop name to 'onSyncStarted' to match App.js
-export default function ConnectStrava({ session, onSyncStarted }) {
+// Random value echoed back by Strava, so the app only accepts a code from its own request.
+const newOAuthState = () => Math.random().toString(36).slice(2) + Date.now().toString(36);
+
+export default function ConnectStrava({ failed, error, onSyncStarted }) {
   const [loading, setLoading] = useState(false);
-  const [statusText, setStatusText] = useState("Connect your account to analyze your history.");
+  const [statusText, setStatusText] = useState(
+    failed
+      ? error || "The last import did not work. Please connect again."
+      : "Connect your account to analyze your history."
+  );
 
   // --- A. Handle the OAuth Flow ---
   const handleConnect = async () => {
@@ -21,8 +26,11 @@ export default function ConnectStrava({ session, onSyncStarted }) {
 
     try {
       // 1. Open Strava in a browser popup
-      const authUrl = `https://www.strava.com/oauth/authorize?client_id=${STRAVA_CLIENT_ID}&response_type=code&redirect_uri=${REDIRECT_URI}&scope=activity:read_all`;
-      
+      const state = newOAuthState();
+      const authUrl = `https://www.strava.com/oauth/authorize?client_id=${STRAVA_CLIENT_ID}`
+        + `&response_type=code&redirect_uri=${encodeURIComponent(REDIRECT_URI)}`
+        + `&scope=activity:read_all&state=${state}`;
+
       const result = await WebBrowser.openAuthSessionAsync(authUrl, REDIRECT_URI);
 
       if (result.type === 'success' && result.url) {
@@ -30,7 +38,10 @@ export default function ConnectStrava({ session, onSyncStarted }) {
         const params = Linking.parse(result.url);
         const code = params.queryParams.code;
 
-        if (code) {
+        if (params.queryParams.state !== state) {
+          Alert.alert("Error", "Strava answered a different login request. Please try again.");
+          setLoading(false);
+        } else if (code) {
           setStatusText("Code received! Syncing data...");
           await sendCodeToBackend(code);
         } else {
@@ -49,16 +60,7 @@ export default function ConnectStrava({ session, onSyncStarted }) {
   // --- B. Send Code to Python Backend ---
   const sendCodeToBackend = async (code) => {
     try {
-      const response = await fetch(`${BACKEND_URL}/connect-strava`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          user_id: session.user.id,
-          code: code
-        })
-      });
-
-      const data = await response.json();
+      const data = await apiPost('/connect-strava', { code });
 
       if (data.status === 'processing') {
         setStatusText("✅ Connected! Starting background sync...");
@@ -73,7 +75,7 @@ export default function ConnectStrava({ session, onSyncStarted }) {
         throw new Error("Backend rejected the request.");
       }
     } catch (e) {
-      Alert.alert("Connection Failed", "Is your Python server running? " + e.message);
+      Alert.alert("Connection Failed", e.message);
       setLoading(false);
     }
   };

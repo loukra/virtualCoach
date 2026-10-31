@@ -1,0 +1,44 @@
+name: Evals
+
+# Runs the prompts against the real model. Manual only: every run costs API credit.
+on:
+  workflow_dispatch:
+    inputs:
+      runs:
+        description: Repeat every scenario this often
+        default: "1"
+      plan:
+        description: Also generate the plan scenarios (slower, more tokens)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  evals:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements*.txt
+      - run: pip install -r requirements.txt
+      - run: python -m evals.run_evals --runs "$RUNS" $PLAN_FLAG --min-pass 0.9
+        env:
+          RUNS: ${{ inputs.runs }}
+          PLAN_FLAG: ${{ inputs.plan && '--plan' || '' }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          STRAVA_CLIENT_ID: "0"
+          STRAVA_CLIENT_SECRET: unused
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: eval-report
+          path: backend/evals/reports/*.json
