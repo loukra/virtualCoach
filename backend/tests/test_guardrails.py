@@ -130,3 +130,19 @@ def test_block_ranges_never_leave_race_week_alone():
     assert block_ranges(70) == [(1, 28), (29, 56), (57, 70)]
     assert block_ranges(30) == [(1, 30)]
     assert block_ranges(7) == [(1, 7)]
+
+
+def test_blocks_end_on_sundays_after_a_short_first_week():
+    from logic.ai_planner import block_ranges
+
+    # Wednesday start: the first block holds the five-day week 1 plus three full weeks.
+    assert block_ranges(5 + 7 * 15, offset=2) == [(1, 26), (27, 54), (55, 82), (83, 110)]
+
+
+def test_returning_to_build_load_after_a_recovery_week_is_no_jump():
+    phases = ["Build", "Build", "Build", "Recovery", "Build", "Race"]
+    def jumps(tss):
+        return any("load jumps" in e for e in validate_macro(macro(tss, phases), 42))
+
+    assert not jumps([400, 440, 470, 280, 470, 250])
+    assert jumps([400, 440, 470, 280, 700, 250])

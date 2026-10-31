@@ -4,7 +4,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import Markdown from 'react-native-markdown-display';
 import { apiDelete, apiGet, apiPost, apiPut } from '../lib/api';
-import { localDateString, weekdayName } from '../lib/dates';
+import { localDateString, parseLocalDate, weekdayName } from '../lib/dates';
 import { shareWorkout } from '../lib/share';
 import { colors, TYPE_COLORS } from '../theme';
 import CheckInModal from './CheckInModal';
@@ -173,7 +173,8 @@ export default function JourneyOverview({ route, navigation }) {
       <View style={{ flex: 1, alignItems: 'center' }}>
         <Text style={styles.navTitle} numberOfLines={1}>{journey.name}</Text>
         <Text style={styles.navSub}>
-          {today ? `Week ${today.week.number} of ${today.week.total}` : ''}
+          {today?.starts_on ? `Starts ${formatDay(today.starts_on)} · ${today.week.total} weeks` : ''}
+          {today && !today.starts_on ? `Week ${today.week.number} of ${today.week.total}` : ''}
           {today && !isBuild ? ` · ${countdownText(journey.race_date)}` : ''}
         </Text>
       </View>
@@ -274,12 +275,14 @@ export default function JourneyOverview({ route, navigation }) {
           ) : (
             <>
               <Text style={styles.planType}>
-                {suggestion.mode === 'recovery' ? 'Easy recovery spin' : suggestion.mode === 'done' ? 'Done for today' : 'Rest day'}
+                {today.starts_on ? 'Not started yet'
+                  : suggestion.mode === 'recovery' ? 'Easy recovery spin'
+                  : suggestion.mode === 'done' ? 'Done for today' : 'Rest day'}
               </Text>
               <Text style={styles.planDesc}>{suggestion.reason}</Text>
             </>
           )}
-          {openSessions.length > 0 && (
+          {openSessions.length > 0 && !today.starts_on && (
             <TouchableOpacity style={styles.linkRow} onPress={() => setChoosing(!choosing)}>
               <Text style={styles.linkText}>{choosing ? 'Close' : selected ? 'Ride another session' : 'Ride a session anyway'}</Text>
               <Ionicons name={choosing ? 'chevron-up' : 'chevron-down'} size={16} color={colors.accent} />
@@ -380,7 +383,7 @@ export default function JourneyOverview({ route, navigation }) {
         </View>
 
         {/* THIS WEEK */}
-        <Text style={styles.sectionLabel}>THIS WEEK</Text>
+        <Text style={styles.sectionLabel}>{today.starts_on ? 'FIRST WEEK' : 'THIS WEEK'}</Text>
         <View style={styles.card}>
           <View style={styles.progressRow}>
             <Text style={styles.hint}>{week.ridden_tss} of {week.planned_tss} TSS</Text>
@@ -423,6 +426,10 @@ export default function JourneyOverview({ route, navigation }) {
       </ScrollView>
     </SafeAreaView>
   );
+}
+
+function formatDay(iso) {
+  return parseLocalDate(iso).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' });
 }
 
 function countdownText(raceDate) {

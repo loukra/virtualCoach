@@ -3,16 +3,16 @@
 Tests are placed and built by code, never by the model: a test is only useful if every one is
 ridden the same way, so the results can be compared over the winter.
 """
-import math
 from datetime import date, timedelta
 
 import numpy as np
 
 from core import db
+from core.dates import plan_week
 from logic.schemas import Workout, WorkoutStep
 
 TEST_EVERY_WEEKS = 5
-TEST_DAY_IN_WEEK = 2  # the day before (day 1 of the week) is kept easy
+TEST_DAY_IN_WEEK = 2  # Tuesday; the Monday before is kept easy
 TEST_DURATION_MIN = 51
 TEST_TSS = 65
 FTP_FROM_20MIN = 0.95  # FTP is about 95 % of the best 20-minute power
@@ -21,23 +21,26 @@ LOOKBACK_DAYS = 28
 MAX_FILL_GAP_S = 3  # longer gaps in the power stream are stops, counted as 0 W
 
 
-def test_weeks(total_days: int, goal_type: str) -> list[int]:
+def test_weeks(total_days: int, goal_type: str, offset: int = 0) -> list[int]:
     """Weeks with an FTP test: the first, then every five weeks.
 
-    A fitness block also ends with a test, to show what the winter brought. A race plan keeps
-    the last three weeks free of tests, so the taper is not spent on a maximal effort.
+    Tests are on Tuesdays, after an easy Monday; a plan that starts after Monday has its first
+    test in week 2. A fitness block also ends with a test, to show what the winter brought. A
+    race plan keeps the last three weeks free of tests, so the taper is not spent on a maximal
+    effort.
     """
-    weeks = math.ceil(total_days / 7)
+    weeks = plan_week(total_days, offset)
+    first = 1 if offset == 0 else 2
     if goal_type == "build":
-        tests = list(range(1, weeks + 1, TEST_EVERY_WEEKS))
-        if weeks - tests[-1] >= 3:
+        tests = list(range(first, weeks + 1, TEST_EVERY_WEEKS))
+        if tests and weeks - tests[-1] >= 3:
             tests.append(weeks)
         return tests
-    return list(range(1, weeks - 2, TEST_EVERY_WEEKS)) if weeks >= 6 else []
+    return list(range(first, weeks - 2, TEST_EVERY_WEEKS)) if weeks >= 6 else []
 
 
-def test_days(total_days: int, goal_type: str) -> list[int]:
-    days = [(w - 1) * 7 + TEST_DAY_IN_WEEK for w in test_weeks(total_days, goal_type)]
+def test_days(total_days: int, goal_type: str, offset: int = 0) -> list[int]:
+    days = [(w - 1) * 7 + TEST_DAY_IN_WEEK - offset for w in test_weeks(total_days, goal_type, offset)]
     last_training_day = total_days - 1 if goal_type == "race" else total_days
     return [d for d in days if d <= last_training_day]
 

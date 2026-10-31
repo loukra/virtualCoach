@@ -10,6 +10,7 @@ import math
 from datetime import date, timedelta
 
 from core import db
+from core.dates import monday_of
 
 KEY_TYPES = {"FTP Test", "VO2 Max", "Anaerobic", "Threshold", "Sweet Spot"}
 INTENSE_TYPES = {"FTP Test", "VO2 Max", "Anaerobic", "Threshold"}  # never the day after a hard ride
@@ -23,12 +24,13 @@ FRESH_ENOUGH_TSB = -15  # an FTP test needs reasonably fresh legs to mean anythi
 # --- plan weeks ---
 
 def week_number(start: date, day: date) -> int:
-    return (day - start).days // 7 + 1
+    """Calendar week of the plan (Monday to Sunday); week 1 is the one the plan starts in."""
+    return (monday_of(day) - monday_of(start)).days // 7 + 1
 
 
 def week_bounds(start: date, end: date, week: int) -> tuple[date, date]:
-    first = start + timedelta(days=(week - 1) * 7)
-    return first, min(first + timedelta(days=6), end)
+    monday = monday_of(start) + timedelta(days=(week - 1) * 7)
+    return max(monday, start), min(monday + timedelta(days=6), end)
 
 
 def ride_intensity(ride: dict) -> float | None:

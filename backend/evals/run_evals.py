@@ -27,6 +27,7 @@ for key, value in {"STRAVA_CLIENT_ID": "0", "STRAVA_CLIENT_SECRET": "unused"}.it
 
 import logic.ai as ai  # noqa: E402
 from core.config import get_settings  # noqa: E402
+from core.dates import end_after_weeks  # noqa: E402
 from evals.checks import plan_checks, workout_checks  # noqa: E402
 from evals.judge import judge_workout, verdict_problems  # noqa: E402
 from logic import ftp  # noqa: E402
@@ -113,8 +114,12 @@ PLAN_SCENARIOS = {
 
 def run_plan_scenario(name: str) -> dict:
     s = PLAN_SCENARIOS[name]
-    start_date = date.today()
-    total_days = s["weeks"] * 7
+    start_date = date.today()  # any weekday: a mid-week start gives a short first week
+    offset = start_date.weekday()
+    if s["goal_type"] == "build":
+        total_days = (end_after_weeks(start_date, s["weeks"]) - start_date).days + 1
+    else:
+        total_days = s["weeks"] * 7
     start = len(attempt_log)
     started = time.monotonic()
     try:
@@ -124,7 +129,8 @@ def run_plan_scenario(name: str) -> dict:
             weight=75, current_ctl=PLAN_CTL, longest_ride_min=180, goal_type=s["goal_type"],
         )
         problems = [] if len(days) == total_days else [f"{len(days)} days instead of {total_days}"]
-        problems += plan_checks(days, PLAN_CTL, s["goal_type"], ftp.test_days(total_days, s["goal_type"]))
+        tests = ftp.test_days(total_days, s["goal_type"], offset)
+        problems += plan_checks(days, PLAN_CTL, s["goal_type"], tests, offset)
     except GenerationError as e:
         days, problems = [], e.errors
     attempts = attempt_log[start:]

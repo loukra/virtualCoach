@@ -244,3 +244,21 @@ def test_checkin_keeps_motivation_and_trims_notes(client, athletes):
     assert client.post("/check-in", headers=athletes["louis"], json=body).status_code == 200
     row = db.query_one("SELECT motivation_score, notes FROM daily_checkins")
     assert row == {"motivation_score": 2, "notes": None}
+
+
+def test_a_plan_can_start_mid_week_with_a_short_first_week(client, athletes, no_background_plan):
+    res = client.post("/create-journey", headers=athletes["louis"], json={
+        "journey_name": "Winter", "goal_type": "build", "weeks": 16, "start_date": "2099-10-28",  # Wednesday
+        "current_ftp": 250, "current_weight": 75,
+    })
+    journey = client.get(f"/journeys/{res.json()['journey_id']}", headers=athletes["louis"]).json()
+    # Week 1 runs Wednesday to Sunday, weeks 2-16 Monday to Sunday.
+    assert (journey["start_date"], journey["race_date"]) == ("2099-10-28", "2100-02-14")
+
+
+def test_today_before_the_plan_starts(client, athletes, no_background_plan):
+    journey_id = active_week(client, athletes["louis"], today() + timedelta(days=2),
+                             [(1, "Recovery", 30, 15), (2, "FTP Test", 51, 65)])
+    view = client.get(f"/journeys/{journey_id}/today", headers=athletes["louis"]).json()
+    assert view["starts_on"] == (today() + timedelta(days=2)).isoformat()
+    assert view["suggestion"]["mode"] == "rest" and "Your plan starts on" in view["suggestion"]["reason"]

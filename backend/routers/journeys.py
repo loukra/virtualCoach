@@ -1,12 +1,12 @@
 
 import uuid
-from datetime import date, timedelta
+from datetime import date
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 
 from core import db
 from core.auth import current_athlete
-from core.dates import today
+from core.dates import end_after_weeks, today
 from logic import ftp, sessions
 from logic.workers import run_ai_plan_generation
 from models import CreateJourneyRequest
@@ -36,7 +36,7 @@ def create_journey_endpoint(
     if payload.goal_type == "build":
         if not payload.weeks:
             raise HTTPException(400, "Choose how many weeks the plan should run.")
-        end_date = start_date + timedelta(days=payload.weeks * 7 - 1)
+        end_date = end_after_weeks(start_date, payload.weeks)  # a short first week counts as week 1
     elif payload.race_date is None:
         raise HTTPException(400, "Choose the race date.")
     else:
@@ -109,7 +109,13 @@ def journey_today(journey_id: str, athlete_id: int = Depends(current_athlete)):
         sessions.match_rides(journey)
     week, first, last, week_no = sessions.week_sessions(journey, day)
     ready = sessions.readiness(athlete_id, day)
-    choice = sessions.choose_session(week, day, last, ready)
+    start = date.fromisoformat(journey["start_date"])
+    if day < start:
+        starts = start.strftime("%A, %d %B").replace(" 0", " ")
+        choice = {"mode": "rest", "session": None,
+                  "reason": f"Your plan starts on {starts}. Until then, ride as you like or rest."}
+    else:
+        choice = sessions.choose_session(week, day, last, ready)
     prescription = db.query_one(
         "SELECT workout_text, duration_min, estimated_tss, recovery_reason, chosen_plan_id"
         " FROM daily_prescriptions WHERE journey_id = ? AND date = ?",
@@ -120,14 +126,15 @@ def journey_today(journey_id: str, athlete_id: int = Depends(current_athlete)):
         " WHERE athlete_id = ? AND substr(start_date_local, 1, 10) BETWEEN ? AND ?",
         [athlete_id, first.isoformat(), last.isoformat()],
     )
-    start, end = date.fromisoformat(journey["start_date"]), date.fromisoformat(journey["race_date"])
+    end = date.fromisoformat(journey["race_date"])
     return {
         "date": day.isoformat(),
         "goal_type": journey["goal_type"],
+        "starts_on": journey["start_date"] if day < start else None,
         "suggestion": choice,
         "week": {
             "number": week_no,
-            "total": (end - start).days // 7 + 1,
+            "total": sessions.week_number(start, end),
             "first_day": first.isoformat(),
             "last_day": last.isoformat(),
             "planned_tss": sum(s["planned_tss"] for s in week),

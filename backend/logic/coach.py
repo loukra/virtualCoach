@@ -107,7 +107,7 @@ def get_context(athlete_id: int, journey: dict, session: dict | None) -> dict:
         "goal_type": journey.get("goal_type") or "race",
         "days_until_race": (end - current).days,
         "current_week": week_no,
-        "total_weeks": (end - start).days // 7 + 1,
+        "total_weeks": sessions.week_number(start, end),
         "compliance": format_compliance_history(recent_plans, recent_rides, current),
         "week": format_week(week, current),
         "checkins": format_checkins(ready["checkins"]),

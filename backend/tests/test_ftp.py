@@ -111,3 +111,20 @@ def test_fitness_plan_load_must_grow_with_the_weeks():
                       " of about 287 TSS (at least 265)."]
     growing = macro([180, 195, 210, 150, 215, 230, 245, 175, 245, 260, 275, 195, 270, 285, 295, 210], phases)
     assert validate_macro(growing, 16 * 7, "build", ctl=25) == []
+
+
+def test_a_mid_week_start_moves_the_first_test_to_the_first_full_week():
+    # Wednesday start (offset 2), 16 calendar weeks: week 1 has five days.
+    total = 5 + 15 * 7
+    assert ftp.test_weeks(total, "build", offset=2) == [2, 7, 12, 16]
+    assert ftp.test_days(total, "build", offset=2) == [7, 42, 77, 105]  # all Tuesdays
+
+
+def test_short_first_week_is_judged_by_its_days():
+    weeks = macro([150, 300, 330, 360], ["Base", "Base", "Build", "Build"])
+    # Five-day first week (Wednesday start): 150 TSS is about 210 for a full week, so 300 is fine.
+    assert validate_macro(weeks, 5 + 21, "build", ctl=30, offset=2) == []
+    too_much = macro([400, 300, 330, 360], ["Base", "Base", "Build", "Build"])
+    assert validate_macro(too_much, 5 + 21, "build", ctl=30, offset=2) == [
+        "Week 1 has only 5 days: plan load for those days only, at most about 193 TSS."
+    ]

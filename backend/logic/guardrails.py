@@ -5,9 +5,10 @@ may be used; otherwise the violations go back to the model as a repair request
 (logic.ai.generate_structured). The rules are deliberately coarse: they catch unsafe or
 broken plans, not stylistic preferences.
 """
-import math
+from collections import Counter
 from collections.abc import Collection
 
+from core.dates import plan_week
 from logic.ftp import TEST_DURATION_MIN, TEST_TSS
 from logic.schemas import MacroPlan, PlanDay, Workout
 from logic.workout_math import max_power, step_segments, total_duration_s
@@ -35,11 +36,17 @@ def build_peak_tss(ctl: float, weeks: int, share: float = 1.0) -> int:
     return round(7 * (ctl + share * weeks))
 
 
+def week_lengths(total_days: int, offset: int) -> Counter:
+    """Plan days per calendar week: the first and last week may be short."""
+    return Counter(plan_week(n, offset) for n in range(1, total_days + 1))
+
+
 def validate_macro(
-    macro: MacroPlan, total_days: int, goal_type: str = "race", ctl: float | None = None
+    macro: MacroPlan, total_days: int, goal_type: str = "race", ctl: float | None = None, offset: int = 0
 ) -> list[str]:
     errors: list[str] = []
-    expected = math.ceil(total_days / 7)
+    expected = plan_week(total_days, offset)
+    lengths = week_lengths(total_days, offset)
     weeks = macro.weeks
     if [w.week_number for w in weeks] != list(range(1, expected + 1)):
         errors.append(f"Return exactly {expected} weeks numbered 1 to {expected}.")
@@ -49,11 +56,22 @@ def validate_macro(
         if not 0 <= w.target_tss <= 1500:
             errors.append(f"Week {w.week_number}: target_tss {w.target_tss} is outside 0-1500.")
 
-    for prev, cur in zip(weeks, weeks[1:], strict=False):
-        if cur.target_tss > prev.target_tss * 1.25 + 60:
+    def per_week(w):  # a short week's load scaled to seven days, so short weeks compare fairly
+        return w.target_tss * 7 / lengths[w.week_number]
+
+    if lengths[1] < 7 and weeks[0].target_tss > ((ctl or 0) * 7 + 60) * lengths[1] / 7 + 30:
+        errors.append(
+            f"Week 1 has only {lengths[1]} days: plan load for those days only, at most"
+            f" about {round(((ctl or 0) * 7 + 60) * lengths[1] / 7)} TSS."
+        )
+    # Compared with the strongest of the last four weeks: returning to the build level after a
+    # recovery week is normal, only going clearly beyond it is a jump.
+    for i, cur in enumerate(weeks[1:], start=1):
+        ref = max(weeks[max(0, i - 4) : i], key=per_week)
+        if per_week(cur) > per_week(ref) * 1.25 + 60:
             errors.append(
-                f"Week {cur.week_number}: load jumps from {prev.target_tss} to {cur.target_tss} TSS;"
-                " keep week-over-week increases at or below about 25 %."
+                f"Week {cur.week_number}: load jumps to {cur.target_tss} TSS from at most"
+                f" {ref.target_tss} in the weeks before; keep increases at or below about 25 %."
             )
 
     if goal_type == "build":
@@ -94,6 +112,7 @@ def validate_days(
     week_targets: dict[int, int],
     goal_type: str = "race",
     test_days: Collection[int] = (),
+    offset: int = 0,
 ) -> list[str]:
     errors: list[str] = []
     if [d.day_number for d in days] != list(range(first_day, last_day + 1)):
@@ -147,10 +166,10 @@ def validate_days(
 
     by_week: dict[int, list[PlanDay]] = {}
     for d in days:
-        by_week.setdefault((d.day_number - 1) // 7 + 1, []).append(d)
+        by_week.setdefault(plan_week(d.day_number, offset), []).append(d)
     for week, week_days in by_week.items():
         if len(week_days) < 7:
-            continue  # partial week at the block edge or before race day
+            continue  # short first week, or the week of race day
         if not any(d.planned_workout_type in EASY_TYPES for d in week_days):
             errors.append(f"Week {week}: include at least one Rest or Recovery day.")
         target = week_targets.get(week)

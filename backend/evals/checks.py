@@ -5,6 +5,7 @@ go further and are only run in the evals, because they judge coaching intent, wh
 miss is a signal to look at the prompt, not a reason to reject a workout in the app.
 Each function returns a list of problems in plain language; an empty list means it passed.
 """
+from core.dates import plan_week
 from logic.guardrails import RECOVERY_MAX_POWER, build_peak_tss
 from logic.schemas import PlanDay, Workout
 from logic.workout_math import estimate_tss, step_segments
@@ -74,7 +75,8 @@ def workout_checks(
 
 
 def plan_checks(
-    days: list[PlanDay], current_ctl: float, goal_type: str = "race", test_days: list[int] = ()
+    days: list[PlanDay], current_ctl: float, goal_type: str = "race", test_days: list[int] = (),
+    offset: int = 0,
 ) -> list[str]:
     """Shape of a whole plan: sensible start, a build, not too many hard days; a race plan
     tapers, a fitness plan keeps its FTP tests and enough quality work to raise FTP."""
@@ -82,7 +84,10 @@ def plan_checks(
     tests = [d.day_number for d in days if d.planned_workout_type == "FTP Test"]
     if tests != list(test_days):
         problems.append(f"FTP tests on days {tests}, expected {list(test_days)}")
-    weeks = [days[i : i + 7] for i in range(0, len(days), 7)]
+    by_week: dict[int, list[PlanDay]] = {}
+    for number, d in enumerate(days, start=1):  # days are in order from day 1
+        by_week.setdefault(plan_week(number, offset), []).append(d)
+    weeks = list(by_week.values())  # calendar weeks; the first and last may be short
     full_weeks = [w for w in weeks if len(w) == 7]
     weekly_tss = [sum(d.planned_tss for d in w) for w in full_weeks]
     if len(weekly_tss) < 3:

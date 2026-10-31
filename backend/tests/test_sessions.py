@@ -145,3 +145,13 @@ def test_heavy_legs_and_load_spikes_rule_out_hard_sessions():
         [checkin(legs=2), checkin(legs=2), checkin()], {"ctl": 40, "atl": 65, "tsb": -25}
     )}
     assert kinds == {"heavy_legs": "easy", "load_spike": "easy"}
+
+
+def test_weeks_are_calendar_weeks_when_the_plan_starts_mid_week():
+    from logic.sessions import week_bounds, week_number
+
+    wednesday, end = date(2099, 3, 4), date(2099, 6, 7)
+    assert week_number(wednesday, date(2099, 3, 8)) == 1  # Sunday: still week 1
+    assert week_number(wednesday, date(2099, 3, 9)) == 2  # Monday: week 2
+    assert week_bounds(wednesday, end, 1) == (wednesday, date(2099, 3, 8))
+    assert week_bounds(wednesday, end, 2) == (date(2099, 3, 9), date(2099, 3, 15))

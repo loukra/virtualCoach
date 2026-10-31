@@ -8,6 +8,7 @@ import json
 from datetime import date, timedelta
 
 from core.config import get_settings
+from core.dates import plan_week
 from logic import ftp
 from logic.ai import generate_structured
 from logic.guardrails import build_peak_tss, validate_days, validate_macro
@@ -16,13 +17,15 @@ from logic.schemas import MacroPlan, PlanBlock, PlanDay
 BLOCK_DAYS = 28  # a multiple of 7, so no week is split across two calls
 
 
-def block_ranges(total_days: int) -> list[tuple[int, int]]:
-    """Day ranges for the block calls. A tail shorter than a week joins the block before it, so
-    race day is never planned alone, without the long rides that lead up to it."""
+def block_ranges(total_days: int, offset: int = 0) -> list[tuple[int, int]]:
+    """Day ranges for the block calls, ending on Sundays (a short first week shortens the first
+    block). A tail shorter than a week joins the block before it, so race day is never planned
+    alone, without the long rides that lead up to it."""
     ranges = []
     first = 1
     while first <= total_days:
-        last = min(first + BLOCK_DAYS - 1, total_days)
+        size = BLOCK_DAYS - (offset if first == 1 else 0)
+        last = min(first + size - 1, total_days)
         if total_days - last < 7:
             last = total_days
         ranges.append((first, last))
@@ -66,15 +69,25 @@ def plan_context(
 TIMELINE
 - Plan start (day 1): {start_date.isoformat()} ({start_date.strftime('%A')})
 - {last_day} (day {total_days}): {race_date.isoformat()} ({race_date.strftime('%A')})
-- Today: {current_date.isoformat()}, which is day {days_elapsed} of the plan"""
+- Today: {current_date.isoformat()}, which is day {days_elapsed} of the plan
+{weeks_text(total_days, start_date.weekday())}"""
 
 
-def tests_text(test_days: list[int], first: int = 1, last: int | None = None) -> str:
+def weeks_text(total_days: int, offset: int) -> str:
+    """How the plan days fall into calendar weeks; only needed when the first week is short."""
+    if offset == 0:
+        return "- Plan weeks run Monday to Sunday."
+    short = 7 - offset
+    return (f"- Plan weeks run Monday to Sunday. Week 1 is short: only days 1-{min(short, total_days)}"
+            " (the start day to Sunday); its target covers those days only. Week 2 is the first full week.")
+
+
+def tests_text(test_days: list[int], offset: int = 0, first: int = 1, last: int | None = None) -> str:
     listed = [n for n in test_days if first <= n <= (last or n)]
     if not listed:
         return ""
     lines = "\n".join(
-        f"- Day {n} (week {(n - 1) // 7 + 1}): FTP Test, {ftp.TEST_DURATION_MIN} min,"
+        f"- Day {n} (week {plan_week(n, offset)}): FTP Test, {ftp.TEST_DURATION_MIN} min,"
         f" {ftp.TEST_TSS} TSS. Day {n - 1} is Rest or Recovery."
         for n in listed
     )
@@ -97,13 +110,14 @@ def build_plan(
 ) -> list[PlanDay]:
     settings = get_settings()
     total_days = (race_date - start_date).days + 1
-    test_days = ftp.test_days(total_days, goal_type)
+    offset = start_date.weekday()
+    test_days = ftp.test_days(total_days, goal_type, offset)
     context = plan_context(
         goal, start_date, race_date, current_date, ftp_watts, weight, current_ctl, longest_ride_min,
         goal_type,
     )
 
-    weeks = -(-total_days // 7)
+    weeks = plan_week(total_days, offset)
     load_target = (
         f"LOAD TARGET\n- The peak build week reaches about {build_peak_tss(current_ctl, weeks)} TSS"
         " (fitness rising about one CTL point per week).\n\n"
@@ -113,9 +127,9 @@ def build_plan(
         kind="plan_macro",
         model=settings.plan_model,
         prompt_name="plan_macro",
-        user_input=f"{context}\n\n{tests_text(test_days)}{load_target}Return {weeks} weeks.",
+        user_input=f"{context}\n\n{tests_text(test_days, offset)}{load_target}Return {weeks} weeks.",
         schema=MacroPlan,
-        validate=lambda m: validate_macro(m, total_days, goal_type, current_ctl),
+        validate=lambda m: validate_macro(m, total_days, goal_type, current_ctl, offset),
         athlete_id=athlete_id,
         journey_id=journey_id,
     )
@@ -125,7 +139,7 @@ def build_plan(
     )
 
     days: list[PlanDay] = []
-    for first, last in block_ranges(total_days):
+    for first, last in block_ranges(total_days, offset):
         calendar = "\n".join(
             f"- Day {n}: {(start_date + timedelta(days=n - 1)).strftime('%a %Y-%m-%d')}"
             for n in range(first, last + 1)
@@ -138,7 +152,7 @@ def build_plan(
         user_input = (
             f"{context}\n\nWEEKLY STRUCTURE\n{macro.summary}\n{weeks_text}\n\n"
             + (f"LAST DAYS ALREADY PLANNED\n{previous}\n\n" if previous else "")
-            + tests_text(test_days, first, last)
+            + tests_text(test_days, offset, first, last)
             + f"FILL DAYS {first} TO {last}\n{calendar}"
         )
         block = generate_structured(
@@ -148,7 +162,7 @@ def build_plan(
             user_input=user_input,
             schema=PlanBlock,
             validate=lambda b, lo=first, hi=last: validate_days(
-                b.days, lo, hi, total_days, week_targets, goal_type, test_days
+                b.days, lo, hi, total_days, week_targets, goal_type, test_days, offset
             ),
             athlete_id=athlete_id,
             journey_id=journey_id,

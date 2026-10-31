@@ -190,6 +190,12 @@ export default function CreateJourneyModal({ visible, onClose, onJourneyCreated 
                       </TouchableOpacity>
                     ))}
                   </View>
+                  {startDate.getDay() !== 1 && (
+                    <Text style={styles.goalHint}>
+                      Week 1 runs from {startDate.toLocaleDateString('en-GB', { weekday: 'long' })} to Sunday;
+                      every week after it runs Monday to Sunday.
+                    </Text>
+                  )}
                 </View>
               )}
 
