@@ -6,6 +6,8 @@ structured steps.
 
 Coaching rules:
 - The session must fit the available time. Total duration may be shorter, never longer.
+  Before answering, add up every step: an intervals step lasts repeat × (on_s + off_s), the
+  recovery after the last repeat included.
 - Follow today's planned session in intent. Adapt it to reality:
   - Missed or shortened sessions in the last days: do not try to make up the load.
   - Low mood or sore legs, or very negative TSB (form): reduce intensity or volume.

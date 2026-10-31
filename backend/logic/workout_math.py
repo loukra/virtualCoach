@@ -103,9 +103,12 @@ def to_markdown(workout: Workout, ftp: int) -> str:
     lines = [f"# {workout.name}", "", workout.rationale, ""]
     for step in workout.steps:
         if step.kind == "intervals":
+            # Every repeat includes its recovery, the last one too (as in the .zwo file).
+            block_s = (step.repeat or 0) * ((step.on_s or 0) + (step.off_s or 0))
             target = (
-                f"**{step.repeat} ×** {_minutes(step.on_s)} @ **{_watts(step.on_power, ftp)} W**"
-                f" / {_minutes(step.off_s)} @ {_watts(step.off_power, ftp)} W"
+                f"**{step.repeat} ×** {_minutes(step.on_s)} @ **{_watts(step.on_power, ftp)} W**,"
+                f" each followed by {_minutes(step.off_s)} easy @ {_watts(step.off_power, ftp)} W"
+                f" ({_minutes(block_s)} in total)"
             )
         elif step.kind == "steady":
             target = f"**{_minutes(step.duration_s)}** @ **{_watts(step.power, ftp)} W**"
