@@ -172,7 +172,7 @@ def journey_today(journey_id: str, athlete_id: int = Depends(current_athlete)):
     else:
         choice = event_today(athlete_id, day) or sessions.choose_session(week, day, last, ready)
     prescription = db.query_one(
-        "SELECT workout_text, duration_min, estimated_tss, recovery_reason, chosen_plan_id"
+        "SELECT workout_text, duration_min, estimated_tss, recovery_reason, chosen_plan_id, source"
         " FROM daily_prescriptions WHERE journey_id = ? AND date = ?",
         [journey_id, day.isoformat()],
     )

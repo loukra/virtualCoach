@@ -112,7 +112,7 @@ def test_workout_is_generated_once_per_day_and_exported(client, athletes, no_bac
     def fake_generate(athlete_id, journey, available_time, session):
         calls.append((athlete_id, journey["id"], available_time))
         return {"date": today(), "workout": sweet_spot_workout(), "markdown": "# Sweet Spot 3x10",
-                "estimated_tss": 57, "recovery_reason": None, "plan_id": None}
+                "estimated_tss": 57, "recovery_reason": None, "plan_id": None, "source": "ai"}
 
     monkeypatch.setattr(routers.workout, "generate_workout", fake_generate)
     body = {"journey_id": journey_id, "available_time": 60}

@@ -3,6 +3,7 @@
     python -m manage add-athlete "Louis"     # prints the new athlete's access token once
     python -m manage new-token "Louis"       # replaces a lost or leaked token
     python -m manage list
+    python -m manage ai-stats --days 30      # quality, latency and tokens of the model calls
 """
 import argparse
 import sys
@@ -30,6 +31,22 @@ def list_athletes() -> None:
               f"  sync={row['sync_status']}  since {row['created_at'][:10]}")
 
 
+def ai_stats(days: int) -> None:
+    from logic.ai_stats import report
+
+    rows = report(days)
+    if not rows:
+        print(f"No model calls in the last {days} days.")
+    for r in rows:
+        share = f"{r['first_try']}/{r['generations']}" if r["generations"] else "-"
+        print(f"{r['kind']:<11} {r['prompt_version']:<20} generations {r['generations']:>4}"
+              f"  valid first try {share:>7}  calls {r['calls']:>4}"
+              f"  latency p50 {r['latency_p50_ms'] or 0:>6} ms  p95 {r['latency_p95_ms'] or 0:>6} ms"
+              f"  tokens {r['input_tokens']:>8} in {r['output_tokens']:>7} out")
+        for problem, count in r["top_violations"]:
+            print(f"{'':<12}{count:>4} x {problem[:100]}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -38,6 +55,7 @@ def main() -> None:
     sub.add_parser("add-athlete").add_argument("name")
     sub.add_parser("new-token").add_argument("name")
     sub.add_parser("list")
+    sub.add_parser("ai-stats").add_argument("--days", type=int, default=30)
     args = parser.parse_args()
 
     db.migrate()
@@ -45,6 +63,8 @@ def main() -> None:
         add_athlete(args.name)
     elif args.command == "new-token":
         replace_token(args.name)
+    elif args.command == "ai-stats":
+        ai_stats(args.days)
     else:
         list_athletes()
 

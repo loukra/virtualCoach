@@ -26,6 +26,9 @@ class Settings(BaseSettings):
     openai_timeout_s: float = 120
     # One generation may try this often: the first answer plus repairs after failed checks.
     ai_max_attempts: int = 3
+    # Model calls per athlete and day (every attempt counts). A plan takes 10-30, a workout 1-3;
+    # beyond the limit workouts fall back to standard sessions built in code.
+    ai_daily_call_limit: int = 150
 
     log_level: str = "INFO"
 

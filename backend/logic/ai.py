@@ -31,6 +31,18 @@ class GenerationError(Exception):
         self.errors = errors
 
 
+class BudgetExceeded(GenerationError):
+    """The athlete's daily number of model calls is used up; nothing was sent to the model."""
+
+
+def calls_today(athlete_id: int) -> int:
+    row = db.query_one(
+        "SELECT COUNT(*) AS n FROM ai_generations WHERE athlete_id = ? AND created_at >= date('now')",
+        [athlete_id],
+    )
+    return row["n"]
+
+
 @lru_cache
 def load_prompt(name: str) -> tuple[str, str]:
     """Returns the prompt text and a version tag that changes whenever the file changes."""
@@ -75,7 +87,10 @@ def generate_structured[T: BaseModel](
     messages: list[dict] = [{"role": "user", "content": user_input}]
     errors: list[str] = []
 
-    for attempt in range(1, get_settings().ai_max_attempts + 1):
+    settings = get_settings()
+    for attempt in range(1, settings.ai_max_attempts + 1):
+        if athlete_id is not None and calls_today(athlete_id) >= settings.ai_daily_call_limit:
+            raise BudgetExceeded(kind, [f"Daily limit of {settings.ai_daily_call_limit} AI calls reached."])
         started = time.monotonic()
         response = None
         try:
@@ -88,7 +103,13 @@ def generate_structured[T: BaseModel](
                 store=False,  # the athlete's data is not kept on OpenAI's side
             )
             parsed = response.output_parsed
-            errors = validate(parsed) if parsed is not None else ["The model refused to answer."]
+            if getattr(response, "status", None) == "incomplete":
+                reason = getattr(response.incomplete_details, "reason", "unknown")
+                parsed, errors = None, [f"The answer was cut off ({reason}). Keep the text fields short."]
+            elif parsed is None:
+                errors = ["The model refused to answer."]
+            else:
+                errors = validate(parsed)
         except openai.OpenAIError as e:
             _record(
                 athlete_id=athlete_id, journey_id=journey_id, kind=kind, model=model,

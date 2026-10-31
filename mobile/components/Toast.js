@@ -8,16 +8,19 @@ const VISIBLE_MS = 3500;
 // A short note at the bottom of the screen that fades out on its own; nothing to tap away.
 export default function Toast({ message, onHide, bottom = 24 }) {
   const opacity = useRef(new Animated.Value(0)).current;
+  // The latest onHide without restarting the timer when the parent renders a new function.
+  const hide = useRef(onHide);
+  hide.current = onHide;
 
   useEffect(() => {
     if (!message) return undefined;
     opacity.setValue(0);
     Animated.timing(opacity, { toValue: 1, duration: 200, useNativeDriver: true }).start();
     const timer = setTimeout(() => {
-      Animated.timing(opacity, { toValue: 0, duration: 300, useNativeDriver: true }).start(() => onHide());
+      Animated.timing(opacity, { toValue: 0, duration: 300, useNativeDriver: true }).start(() => hide.current());
     }, VISIBLE_MS);
     return () => clearTimeout(timer);
-  }, [message]);
+  }, [message, opacity]);
 
   if (!message) return null;
   return (

@@ -74,6 +74,20 @@ export default function JourneyOverview({ route, navigation }) {
     }
   }, [journeyId]);
 
+  // While the plan is built or adapted to new events, check every few seconds.
+  const startPolling = useCallback(() => {
+    if (pollingRef.current) return;
+    pollingRef.current = setInterval(async () => {
+      const data = await apiGet(`/journeys/${journeyId}`).catch(() => null);
+      if (data && !isBusy(data)) {
+        clearInterval(pollingRef.current);
+        pollingRef.current = null;
+        setJourney(data);
+        loadToday();
+      }
+    }, 3000);
+  }, [journeyId, loadToday]);
+
   const loadJourney = useCallback(async () => {
     try {
       const data = await apiGet(`/journeys/${journeyId}`);
@@ -82,7 +96,7 @@ export default function JourneyOverview({ route, navigation }) {
     } catch (e) {
       Alert.alert('Error', e.message);
     }
-  }, [journeyId]);
+  }, [journeyId, startPolling]);
 
   const loadEvents = useCallback(async () => {
     try {
@@ -97,21 +111,7 @@ export default function JourneyOverview({ route, navigation }) {
     loadToday();
     loadEvents();
     return () => { if (pollingRef.current) clearInterval(pollingRef.current); };
-  }, [journeyId]);
-
-  // While the plan is built or adapted to new events, check every few seconds.
-  const startPolling = () => {
-    if (pollingRef.current) return;
-    pollingRef.current = setInterval(async () => {
-      const data = await apiGet(`/journeys/${journeyId}`).catch(() => null);
-      if (data && !isBusy(data)) {
-        clearInterval(pollingRef.current);
-        pollingRef.current = null;
-        setJourney(data);
-        loadToday();
-      }
-    }, 3000);
-  };
+  }, [loadJourney, loadToday, loadEvents]);
 
   const onRefresh = async () => {
     setRefreshing(true);
@@ -428,6 +428,14 @@ export default function JourneyOverview({ route, navigation }) {
                 <TouchableOpacity style={styles.banner} onPress={() => handleGenerateWorkout(true)}>
                   <Ionicons name="refresh" size={16} color={colors.warn} />
                   <Text style={styles.bannerText}>This workout was made before your check-in. Tap to update it.</Text>
+                </TouchableOpacity>
+              ) : null}
+              {workout.source === 'fallback' ? (
+                <TouchableOpacity style={styles.banner} onPress={() => handleGenerateWorkout(true)}>
+                  <Ionicons name="construct-outline" size={16} color={colors.warn} />
+                  <Text style={styles.bannerText}>
+                    Standard session: the coach could not tailor a workout just now. Tap to try again.
+                  </Text>
                 </TouchableOpacity>
               ) : null}
               {workout.recovery_reason ? (

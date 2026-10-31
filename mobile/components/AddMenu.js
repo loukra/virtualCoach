@@ -11,7 +11,7 @@ export default function AddMenu({ options }) {
 
   useEffect(() => {
     Animated.spring(progress, { toValue: open ? 1 : 0, useNativeDriver: true, friction: 7, tension: 80 }).start();
-  }, [open]);
+  }, [open, progress]);
 
   const choose = (option) => {
     setOpen(false);

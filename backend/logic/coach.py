@@ -1,16 +1,20 @@
 """Today's workout: gather the athlete's context, apply hard rules, let the LLM prescribe."""
 import json
+import logging
 from datetime import date, timedelta
 
 from core import db
 from core.config import get_settings
 from core.dates import today
 from logic import ftp, sessions
-from logic.ai import generate_structured
+from logic.ai import GenerationError, generate_structured
+from logic.fallback import standard_workout
 from logic.guardrails import validate_workout
 from logic.schemas import Workout
 from logic.sessions import forced_recovery_reason  # noqa: F401 (part of this module's interface)
 from logic.workout_math import estimate_tss, to_markdown
+
+log = logging.getLogger(__name__)
 
 DEFAULT_FTP = 200
 DEFAULT_MAX_HR = 190
@@ -179,20 +183,29 @@ def generate_workout(athlete_id: int, journey: dict, available_time: int, sessio
         if available_time < ftp.TEST_DURATION_MIN:
             raise NotEnoughTime(f"The FTP test takes {ftp.TEST_DURATION_MIN} minutes.")
         workout = ftp.test_workout()
+        source = "code"
     else:
-        workout = generate_structured(
-            kind="workout",
-            model=get_settings().workout_model,
-            prompt_name="workout",
-            user_input=workout_input(ctx, available_time, recovery_reason),
-            schema=Workout,
-            validate=lambda w: validate_workout(
-                w, available_time, ctx["max_hr"], recovery_reason is not None
-            ),
-            athlete_id=athlete_id,
-            journey_id=journey["id"],
-            max_output_tokens=16000,
-        )
+        try:
+            workout = generate_structured(
+                kind="workout",
+                model=get_settings().workout_model,
+                prompt_name="workout",
+                user_input=workout_input(ctx, available_time, recovery_reason),
+                schema=Workout,
+                validate=lambda w: validate_workout(
+                    w, available_time, ctx["max_hr"], recovery_reason is not None
+                ),
+                athlete_id=athlete_id,
+                journey_id=journey["id"],
+                max_output_tokens=16000,
+            )
+            source = "ai"
+        except GenerationError as e:
+            # Degrade, don't fail: the athlete still gets the planned session as a standard set.
+            log.warning("Workout falls back to a standard session: %s", e.errors)
+            planned = session["planned_workout_type"] if session else None
+            workout = standard_workout(planned, available_time, recovery_reason is not None)
+            source = "fallback"
     # A recovery spin in place of a quality session does not complete that session.
     counts_for_session = session is not None and not (
         recovery_reason and session["planned_workout_type"] not in sessions.EASY_TYPES
@@ -204,4 +217,5 @@ def generate_workout(athlete_id: int, journey: dict, available_time: int, sessio
         "estimated_tss": estimate_tss(workout),
         "recovery_reason": recovery_reason,
         "plan_id": session["id"] if counts_for_session else None,
+        "source": source,
     }
