@@ -3,8 +3,8 @@
 **An AI cycling coach that plans your training around your races, and a working example of how to make LLM output reliable enough to act on.**
 
 It imports your rides from Strava, tracks fitness and fatigue, has an LLM build a periodized
-plan and write each day's workout from that plan and how you feel, and sends the workout to
-Zwift. The model proposes, code decides: every answer is structured, checked, repaired or
+plan and write each day's workout from that plan and how you feel, and turns the workout
+into a Zwift file. The model proposes, code decides: every answer is structured, checked, repaired or
 replaced, logged and evaluated.
 
 ![Home with journeys and events, the plus menu, today's session, the workout with Zwift export, and the calendar](docs/screenshots/hero.png)
@@ -34,6 +34,7 @@ flowchart TD
     R --> M
     G -- "still invalid after 3 tries,<br/>or the API is down" --> F["Standard session<br/>built in code"]
     F --> S
+    S --> Z["<b>Numbers and export, in code</b><br/>watts from FTP · duration · TSS<br/>Zwift .zwo file"]
 ```
 
 | Decision | Made by |
@@ -58,6 +59,7 @@ flowchart TD
 | Hard rules before the model | sore legs, low energy, very negative form or a run of low check-ins force recovery; the guardrails reject anything harder | [`sessions.py`](backend/logic/sessions.py) |
 | Staged generation | one call for the weekly structure, then four-week blocks against it: no output limit hit, each block small enough to check | [`ai_planner.py`](backend/logic/ai_planner.py) |
 | Cost and failure limits | timeouts, SDK retries with backoff, a daily call budget per athlete, workouts cached per day and duration | [`ai.py`](backend/logic/ai.py), [`llm.py`](backend/core/llm.py) |
+| Numbers from code | the model gives only the structure in % FTP; watts, duration, TSS and the Zwift XML are computed from it, so they always add up | [`workout_math.py`](backend/logic/workout_math.py) |
 | Versioned prompts | plain files; version = name + content hash, logged with every call and eval report | [`prompts/`](backend/prompts) |
 | Untrusted input stays data | the athlete's goal and notes go in as quoted JSON; an eval tries a prompt injection | [`coach.py`](backend/logic/coach.py) |
 | Data minimization | ride names never reach the model; responses are not stored by OpenAI (`store=False`) | [`coach.py`](backend/logic/coach.py) |
