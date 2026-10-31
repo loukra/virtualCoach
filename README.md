@@ -1,26 +1,25 @@
 # Virtual Coach
 
-**An AI cycling coach that plans your training around your races, and a working example of how to make LLM output reliable enough to act on.**
-
-It imports your rides from Strava, tracks fitness and fatigue, has an LLM build a periodized
-plan and write each day's workout from that plan and how you feel, and turns the workout
-into a Zwift file. The model proposes, code decides: every answer is structured, checked, repaired or
-replaced, logged and evaluated.
+A cycling coach for my winters on Zwift. It reads my rides from Strava, keeps track of fitness
+and fatigue, and lets a language model plan the weeks up to a race and write the workout for
+each day. The workout ends up as a file Zwift can load.
 
 ![Home with journeys and events, the plus menu, today's session, the workout with Zwift export, and the calendar](docs/screenshots/hero.png)
 
 `Python 3.12` · `FastAPI` · `SQLite` · `OpenAI Structured Outputs` · `React Native / Expo` · `Strava API` · `Docker`
 
-## Highlights
+## Why this repo is interesting
 
-- **Guardrails in code.** Every plan and workout is checked against training rules before
-  anyone sees it; violations go back to the model as a precise list.
-- **Never stuck on the model.** If it still fails, or the API is down, a standard session
-  built in code takes its place, clearly labelled.
-- **Plans that follow your life.** Add a race, a group ride or a week off, and the plan is
-  rebuilt from next Monday while the weeks behind you stay as they were.
-- **Measured, not hoped.** Evals against the real model, every call logged with prompt
-  version, tokens and latency, and a report per prompt version.
+Getting an LLM to write a training plan is easy. Getting one you can actually ride is
+harder. A plan can read perfectly well and still be wrong: the days of a week add up to far
+more load than the week was meant to have, hard sessions sit back to back, or the taper is no
+easier than the weeks before it. Nothing in the text gives that away. Even in the last eval
+run, one of the model's answers for the race plan failed the checks and had to be repaired.
+
+So most of the work went into everything around the model. It writes the parts that need
+judgment, like how a plan is structured and what a session looks like. Everything that can
+be computed or checked is done in plain code, and nothing the model returns is used before
+that code has checked it.
 
 ## How the AI works
 
@@ -37,42 +36,64 @@ flowchart TD
     S --> Z["<b>Numbers and export, in code</b><br/>watts from FTP · duration · TSS<br/>Zwift .zwo file"]
 ```
 
-| Decision | Made by |
-|---|---|
-| The weekly structure of a plan (phases, weekly load) | model, checked by code |
-| Each day's session within the weekly targets | model, checked by code |
-| The workout: blocks, targets in % FTP, cues | model, checked by code |
-| Which session you ride today, and whether you rest | code |
-| Forced recovery after bad check-ins, very negative form or a load spike | code |
-| FTP tests: when, and the whole protocol | code |
-| Watts, duration, TSS and the `.zwo` file | code |
-| Whether an answer is accepted at all | code |
+Before the model is called at all, code has already decided a lot. It works out fitness and
+fatigue from the ride history, reads the latest check-in and picks the session for today. If
+the legs are sore, the form is deep in the negative or the load has jumped, it decides on
+recovery, and the model is told so instead of being asked. FTP tests are placed and built in
+code too, because a test only means something if it is the same protocol every time.
 
-### Practices
+The model then answers through
+[Structured Outputs](https://platform.openai.com/docs/guides/structured-outputs) into Pydantic
+schemas ([`schemas.py`](backend/logic/schemas.py)), so there is no text to parse. What comes
+back is checked by [`guardrails.py`](backend/logic/guardrails.py): how fast the load ramps up
+from week to week, recovery weeks, the taper, rest days, whether a day's TSS is physically
+possible, the easy days around a race, days off, the slots for FTP tests, and for workouts
+the length, the power you can sustain and heart-rate caps. When something breaks a rule, the
+model gets the exact list back ("Week 5: days sum to 455 TSS but the target is 305") and
+tries again, up to three times ([`ai.py`](backend/logic/ai.py)). An answer that was cut off
+at the output limit is reported as exactly that, so the model shortens it rather than
+guessing what went wrong.
 
-| Practice | How | Where |
-|---|---|---|
-| Structured output | Pydantic schemas filled via OpenAI Structured Outputs; no text parsing | [`schemas.py`](backend/logic/schemas.py) |
-| Deterministic guardrails | load ramp, recovery weeks, taper, rest days, possible TSS, race days and the easy days around them, days off, FTP slots, workout length, sustainable power, heart-rate caps | [`guardrails.py`](backend/logic/guardrails.py) |
-| Repair loop | up to three attempts; violations come back as a list (*"Week 5: days sum to 455 TSS but the target is 305"*); a cut-off answer is named as such | [`ai.py`](backend/logic/ai.py) |
-| Graceful degradation | a standard session built in code, checked by the same guardrails, labelled in the app; a failed plan rebuild keeps the previous plan | [`fallback.py`](backend/logic/fallback.py) |
-| Hard rules before the model | sore legs, low energy, very negative form or a run of low check-ins force recovery; the guardrails reject anything harder | [`sessions.py`](backend/logic/sessions.py) |
-| Staged generation | one call for the weekly structure, then four-week blocks against it: no output limit hit, each block small enough to check | [`ai_planner.py`](backend/logic/ai_planner.py) |
-| Cost and failure limits | timeouts, SDK retries with backoff, a daily call budget per athlete, workouts cached per day and duration | [`ai.py`](backend/logic/ai.py), [`llm.py`](backend/core/llm.py) |
-| Numbers from code | the model gives only the structure in % FTP; watts, duration, TSS and the Zwift XML are computed from it, so they always add up | [`workout_math.py`](backend/logic/workout_math.py) |
-| Versioned prompts | plain files; version = name + content hash, logged with every call and eval report | [`prompts/`](backend/prompts) |
-| Untrusted input stays data | the athlete's goal and notes go in as quoted JSON; an eval tries a prompt injection | [`coach.py`](backend/logic/coach.py) |
-| Data minimization | ride names never reach the model; responses are not stored by OpenAI (`store=False`) | [`coach.py`](backend/logic/coach.py) |
+If the third attempt fails too, or OpenAI is unreachable, the day still gets a workout:
+[`fallback.py`](backend/logic/fallback.py) builds a standard session of the planned type,
+say 3 x 10 minutes of sweet spot, fitted to the time available and checked by the same
+guardrails. The app labels it as a standard session and offers to ask the coach again. A
+plan rebuild that fails keeps the old plan.
+
+The model also never produces a number that can be calculated. It describes a workout in
+percent of FTP, and [`workout_math.py`](backend/logic/workout_math.py) turns that into watts,
+duration, TSS and the Zwift XML. That way the TSS shown in the app is always the TSS of the
+file you ride.
+
+Plans are generated in two steps ([`ai_planner.py`](backend/logic/ai_planner.py)): one call
+for the shape of the whole plan, week by week, then the days in blocks of four weeks against
+those targets. A 16-week plan in one answer runs into the output limit, and a block of four
+weeks is small enough to check and repair on its own. When I add a race to a running plan,
+only the weeks from next Monday on are planned again.
+
+A few smaller things that matter once you rely on it:
+
+- The OpenAI client has a timeout and retries with backoff ([`llm.py`](backend/core/llm.py)),
+  and every athlete has a daily call budget. Workouts are cached per day and duration, so
+  opening the app twice costs nothing.
+- Prompts are plain files in [`prompts/`](backend/prompts). Their version is the file name plus
+  a hash of the content, and it is stored with every call and every eval report.
+- What the athlete types, like the goal or a note, goes into the prompt as a quoted JSON
+  string, and one eval tries a prompt injection through the goal. Ride names never reach the
+  model, and responses are sent with `store=False`.
 
 ## Evals and observability
 
-The [evals](backend/evals) run the real prompts against the real model on fixed athletes and
-check more than the guardrails: does the main set match the session type, does a race plan
-build and taper, does a fitness block keep its FTP tests, are races and days off where the
-athlete put them? A second model can grade fit, safety and clarity (`--judge`). Each run
-writes a JSON report and prints the change against the previous one.
+The guardrails only catch what is clearly wrong. Whether a workout actually fits the day is
+checked by the [evals](backend/evals), which run the real prompts against the real model on a
+set of made-up athletes. They check whether the main set matches the planned session type,
+whether a race plan builds up and tapers, whether a fitness block keeps its FTP tests, and
+whether races and days off end up where the athlete put them. Optionally a second model
+grades fit, safety and clarity. Every run writes a JSON report and compares itself with the
+previous one.
 
-Latest run, 31 Oct 2026, gpt-6-luna: **9 of 9 passed, 8 on the first answer.**
+The last run (31 October 2026, gpt-6-luna) passed all nine scenarios. Eight were valid on the
+first answer; the 10-week race plan needed one repair.
 
 | Scenario | What it checks | Result |
 |---|---|---|
@@ -86,9 +107,10 @@ Latest run, 31 Oct 2026, gpt-6-luna: **9 of 9 passed, 8 on the first answer.**
 | 12-week fitness block | rising load with FTP tests | ✅ first answer |
 | Fitness block with events | group ride, secondary race, five days off, main race | ✅ first answer |
 
-Every call is logged in `ai_generations` (model, prompt version, tokens, latency, violations).
-`python -m manage ai-stats` summarizes it per prompt version, with the most frequent violations.
-From my own training data:
+In normal use every call lands in the `ai_generations` table with model, prompt version,
+tokens, latency and any rule violations. `python -m manage ai-stats` sums that up per prompt
+version and lists the violations that come up most often, so a prompt change shows quickly
+whether it made things better or worse. From my own data so far:
 
 | Prompt | Valid first try | Latency p50 / p95 | Tokens in / out |
 |---|---|---|---|
@@ -96,36 +118,36 @@ From my own training data:
 | `plan_block@900ead33` | 12 / 12 | 23.1 s / 26.8 s | 21,886 / 34,777 |
 | `workout@80218083` | 1 / 1 | 6.1 s / 6.1 s | 1,148 / 458 |
 
-## Training model
+## How training works in the app
 
-- **Journeys** are goals with a plan: a *race* (base, build, peak, taper) or *build fitness*
-  (N weeks of rising load with FTP tests). They follow each other; a later one is planned on
-  its start day, from the fitness of that day.
-- **Events** are planned by whichever journey covers them:
+A **journey** is a goal with a plan behind it: either a race, with base, build, peak and
+taper, or a fitness block of a set number of weeks with FTP tests along the way. Journeys
+follow one another. One that starts later is planned on its start day, from the fitness I
+have by then.
 
-  | Event | Effect on the plan |
-  |---|---|
-  | Main race | its own lighter race week, easy days around it, no FTP test that week or the next |
-  | Secondary race | ridden from normal training, one easy day before and after |
-  | Group ride | an endurance day of about its length |
-  | Time off | rest days; the week's load drops, an FTP test moves a week |
+Races, group rides and time off are added separately and planned by whichever journey covers
+the date. A main race gets its own lighter week with easy days around it and no FTP test
+close by. A secondary race is ridden out of normal training with an easy day on each side. A
+group ride becomes an endurance day of about its length, and days off become rest days, with
+the rest of that week getting lighter.
 
-- **Flexible weeks.** A week is a set of sessions. Whatever you ride completes the open
-  session it fits best, on any day of that week; code picks today's session from what is left.
-- **Check-ins** (energy, legs, motivation) can force recovery; so can a run of low check-ins
-  or a load spike.
-- **FTP tests** are placed and built in code; the app suggests a new FTP from your best
-  20 minutes.
-- **Fitness** is CTL / ATL / TSB (Banister) from TSS, with power, heart rate or time as the source.
+A week is a set of sessions rather than a fixed timetable. Whatever I ride counts for the
+open session it fits best, on whatever day, and the app picks today's suggestion from what is
+left. Check-ins (energy, legs, motivation) can force an easy day, and so can several poor
+check-ins in a row or a sudden jump in load. Fitness and fatigue are the usual CTL / ATL / TSB
+model from TSS, using power when there is a power meter and heart rate or time otherwise.
+After an FTP test, or a ride whose best 20 minutes point to a clearly higher FTP, the app
+suggests a new value.
 
 ## Run it locally
 
 You need Python 3.12, Node 22, Xcode with the iOS Simulator (or Expo Go on a phone), an
 OpenAI API key and a free [Strava API application](https://www.strava.com/settings/api).
 
-**1. Strava app.** Note the client id and secret. The *Authorization Callback Domain* is the
-host Expo runs on: `127.0.0.1` for the simulator, your computer's LAN IP for a phone. A new
-Strava app allows one connected athlete; ask Strava for more before adding a second person.
+**1. Strava app.** Create it and note the client id and secret. The *Authorization Callback
+Domain* has to be the host Expo runs on: `127.0.0.1` for the simulator, your computer's LAN IP
+for a phone. A new Strava app allows a single connected athlete; for a second person you have
+to ask Strava for more.
 
 **2. Backend**
 
@@ -137,8 +159,8 @@ python3.12 -m venv .venv
 .venv/bin/uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-The database is created on start. Create your athlete in a second terminal; it prints an
-access token once:
+The database is created on the first start. In a second terminal, create your athlete. The
+command prints an access token once, so keep it:
 
 ```bash
 cd backend
@@ -154,44 +176,44 @@ npm ci
 npx expo start --ios
 ```
 
-On a phone, set `EXPO_PUBLIC_API_URL` to your computer's LAN IP and scan the QR code with Expo Go.
+On a phone, point `EXPO_PUBLIC_API_URL` at your computer's LAN IP and scan the QR code with
+Expo Go.
 
-**4. In the app:** enter the token, fill in FTP, weight and max heart rate, connect Strava
-(imports 90 days), then **+ → New journey**. The plan takes a minute or two.
+**4. In the app**, enter the token, fill in FTP, weight and max heart rate, and connect Strava,
+which imports the last 90 days. Then tap **+ → New journey**. Building the plan takes a minute
+or two.
 
 <details>
 <summary>Troubleshooting</summary>
 
-- **Cannot reach the server:** `EXPO_PUBLIC_API_URL` must match the backend's host and port;
-  a phone needs the LAN IP. `http://127.0.0.1:8000/health` should answer `{"status": "ok"}`.
-- **Strava says the redirect is invalid:** the callback domain must be the host Expo runs on.
-- **"The coach could not tailor a workout":** the OpenAI key is missing or out of credit; the
-  app shows a standard session meanwhile.
+- **The app cannot reach the server.** `EXPO_PUBLIC_API_URL` has to match the backend's host
+  and port, and a phone needs the LAN IP. `http://127.0.0.1:8000/health` should answer
+  `{"status": "ok"}`.
+- **Strava says the redirect is invalid.** The callback domain must be the host Expo runs on.
+- **"The coach could not tailor a workout."** The OpenAI key is missing or out of credit. The
+  app shows a standard session in the meantime.
 
 </details>
 
-## Quality pipeline
+## Checks
 
-One script, the same locally and in CI:
+All checks live in one script, so they run the same on my machine and in CI:
 
 ```bash
-scripts/ci.sh            # everything; or: backend | mobile | docker
+scripts/ci.sh            # everything; or just backend, mobile or docker
 ```
 
-| Stage | Guards |
-|---|---|
-| ruff | style, imports, likely bugs |
-| pytest | 229 offline tests: guardrails, planner, events, flexible weeks, the API against a real SQLite file, the AI layer with a fake model (repair, truncation, budget, fallback) |
-| pip-audit | known vulnerabilities in dependencies |
-| ESLint | React and hooks rules, no warnings allowed |
-| Metro bundle | the app bundles for iOS |
-| Docker | the image builds and turns healthy |
-| Evals | the prompts against the real model, run by hand (they cost credit) |
+For the backend that is ruff, pip-audit and 229 pytest tests that never touch the network.
+They cover the guardrails, the planner, events and flexible weeks, the API against a real
+SQLite file, and the AI layer with a fake model, so the repair loop, cut-off answers, the
+budget and the fallback are all exercised. For the app it is ESLint with no warnings allowed
+and a full iOS bundle. The last step builds the Docker image, starts it and waits for it to
+report healthy. The evals are not part of it, since they cost API credit; I run them by hand
+or through [`evals.yml`](.github/workflows/evals.yml).
 
-On GitHub, [`ci.yml`](.github/workflows/ci.yml) runs the script (pinned actions,
-least-privilege token, timeouts), [`evals.yml`](.github/workflows/evals.yml) runs the evals on
-demand, and Dependabot keeps dependencies current. Actions are switched off for now; the
-checks run locally.
+[`ci.yml`](.github/workflows/ci.yml) runs the same script on GitHub with pinned actions, a
+read-only token and timeouts, and Dependabot keeps the dependencies current. Actions are
+switched off for this repository at the moment, so the checks run locally.
 
 ## Deployment
 
@@ -200,9 +222,9 @@ docker compose up -d --build
 docker compose exec backend python -m manage add-athlete "Name"
 ```
 
-Put it behind a reverse proxy with HTTPS (e.g. Caddy). The image runs as a non-root user with
-a health check; the database lives in a volume, and
-[`docker-compose.yml`](docker-compose.yml) shows a consistent backup.
+Put it behind a reverse proxy with HTTPS, Caddy for example. The image runs as a non-root user
+with a health check, the database lives in a volume, and
+[`docker-compose.yml`](docker-compose.yml) shows how to take a consistent backup.
 
 <details>
 <summary>API</summary>
@@ -231,11 +253,11 @@ always comes from the token and every query is scoped to them, so two people can
 </details>
 
 <details>
-<summary>Zwift</summary>
+<summary>Getting a workout into Zwift</summary>
 
-*Send to Zwift* opens the share sheet: AirDrop the `.zwo` to your Mac and move it into
-`Documents/Zwift/Workouts/<your Zwift ID>/`. It shows up under *Custom Workouts*, and the ride
-completes that day's session once Strava syncs it.
+*Send to Zwift* opens the share sheet. AirDrop the `.zwo` to your Mac and move it into
+`Documents/Zwift/Workouts/<your Zwift ID>/`. Zwift lists it under *Custom Workouts* the next
+time it starts, and once Strava has synced the ride, it counts for that day's session.
 
 </details>
 
@@ -257,19 +279,17 @@ scripts/ci.sh  every check, locally and in CI
 
 </details>
 
-## Known limits
+## What is missing
 
-- Strava data goes to OpenAI. Both users have agreed; more users would need a consent screen
-  and a check of Strava's current terms.
-- No Strava webhooks: the app syncs when it opens. Deauthorizing on Strava does not yet delete
-  imported data.
-- Background jobs run in the API process; a restart during plan generation leaves the journey
-  in *creating*.
-- One model provider (OpenAI) is tested.
-- Nine eval scenarios; single runs vary, `--runs N` gives pass rates.
+Strava data goes to OpenAI. The two of us using it have agreed to that, but more users would
+need a proper consent screen and a look at Strava's current terms. There are no Strava
+webhooks yet, so the app syncs when it opens, and disconnecting on Strava's side does not
+delete the imported rides. Plan generation runs as a background task inside the API process,
+so a restart in the middle leaves the journey stuck in *creating*. Only OpenAI has been tested
+as a provider, and nine eval scenarios are a small set; single runs vary, and `--runs N` gives
+pass rates.
 
 ---
 
-Built for my own training and a training partner. Written with
-[Claude Code](https://claude.com/claude-code) as the coding tool; architecture, training rules
-and the quality bar are mine.
+I wrote this with [Claude Code](https://claude.com/claude-code) as my coding tool. The
+architecture, the training rules and the bar for what counts as done are mine.
