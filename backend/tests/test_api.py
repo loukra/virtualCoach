@@ -1,5 +1,5 @@
 """API tests against a real (temporary) SQLite database; only the LLM and Strava are faked."""
-from datetime import timedelta
+from datetime import date, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -196,8 +196,8 @@ def active_week(client, headers, start, sessions):
     return journey_id
 
 
-def test_today_moves_a_missed_session_and_counts_the_ride(client, athletes, no_background_plan):
-    day = today()
+def test_today_moves_a_missed_session_and_counts_the_ride(client, athletes, no_background_plan, on_day):
+    day = on_day(date(2026, 11, 4))  # a Wednesday: all four plan days fall in one calendar week
     start = day - timedelta(days=2)  # today is day 3 of the week
     journey_id = active_week(client, athletes["louis"], start, [
         (1, "Endurance", 60, 45), (2, "Threshold", 75, 85), (3, "Recovery", 45, 25), (4, "Rest", 0, 0),
@@ -293,7 +293,6 @@ def test_scheduled_journey_gets_its_plan_on_its_start_day(client, athletes, no_b
     assert client.get("/journeys", headers=athletes["louis"]).json()[0]["status"] == "scheduled"
     assert started == []
 
-    from datetime import date
     monkeypatch.setattr(routers.journeys, "today", lambda: date(2099, 3, 1))
     assert client.get("/journeys", headers=athletes["louis"]).json()[0]["status"] == "creating"
     assert [j["id"] for j in started] == [journey_id]

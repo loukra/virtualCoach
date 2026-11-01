@@ -1,4 +1,5 @@
 import os
+from datetime import date, datetime
 
 import pytest
 
@@ -21,3 +22,20 @@ def database(tmp_path, monkeypatch):
     db.migrate()
     yield db
     get_settings.cache_clear()
+
+
+@pytest.fixture
+def on_day(monkeypatch):
+    """Pins the athlete's calendar day, for tests whose plan weeks depend on the weekday."""
+    import core.dates
+
+    def pin(day: date) -> date:
+        class Clock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return datetime(day.year, day.month, day.day, 12, tzinfo=tz)
+
+        monkeypatch.setattr(core.dates, "datetime", Clock)
+        return day
+
+    return pin
