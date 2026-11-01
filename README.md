@@ -231,8 +231,8 @@ report healthy. The evals are not part of it, since they cost API credit; they r
 through [`evals.yml`](.github/workflows/evals.yml).
 
 [`ci.yml`](.github/workflows/ci.yml) runs the same script on GitHub with pinned actions, a
-read-only token and timeouts, and Dependabot keeps the dependencies current. Actions are
-switched off for this repository at the moment, so the checks run locally.
+read-only token and timeouts on every push to `main` and every pull request, and Dependabot
+keeps the dependencies current.
 
 ## Deployment
 
